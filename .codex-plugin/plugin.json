@@ -1,0 +1,23 @@
+{
+  "name": "codex-task-plan",
+  "version": "0.1.0+codex.20260907075408",
+  "description": "Compact inline plans with a matching static Codex goal for long-running tasks.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Task Plan",
+    "shortDescription": "Agent-managed inline plans for long tasks.",
+    "longDescription": "Creates compact revisable task plans, links subagent subplans to parent-step progress, tracks parallel work, and re-anchors the card only after enough visual output and a real progress change.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "brandColor": "#4F8CFF",
+    "defaultPrompt": "Create and maintain an inline task plan for this work."
+  },
+  "mcpServers": "./.mcp.json"
+}
