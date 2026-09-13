@@ -13,6 +13,7 @@ import { z } from "zod";
 import { readGoal, syncGoalLink } from "./goal-reader.mjs";
 import { workCategories, workCategoryIds } from "./work-categories.mjs";
 import { openPlanStore } from "./plan-store.mjs";
+import { sendCompanion } from "./companion-bridge.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const categoryIcons = Object.fromEntries(await Promise.all(workCategories.map(async ({ id, label }) => [
@@ -24,7 +25,8 @@ const widgetHtml = (await readFile(join(root, "widget.html"), "utf8"))
 const widgetUri = "ui://codex-task-plan/plan.html";
 const plans = new Map();
 const store = openPlanStore();
-const companionMode = Boolean(process.env.TASK_PLAN_COMPANION_SOCKET);
+const companionSocket = process.env.TASK_PLAN_COMPANION_SOCKET;
+const companionMode = Boolean(companionSocket);
 function registerAppTool(server, name, config, handler) {
   return registerTool(server, name, config, (...args) => store.run(plans, () => {
     if (["update_task_plan_step", "revise_task_plan", "cancel_task_plan"].includes(name)) {
@@ -597,6 +599,37 @@ registerAppTool(
       reanchor_score: plan.reanchorScore,
       shown_revision: plan.lastShownRevision,
     });
+  },
+);
+
+registerAppTool(
+  server,
+  "set_companion_focus_mode",
+  {
+    title: "Set companion focus mode",
+    description:
+      "Enable or disable the persisted Task Plan companion behavior that collapses the plan window to a draggable icon while Codex is unfocused. Use only when the user explicitly asks to change this preference.",
+    inputSchema: { enabled: z.boolean() },
+    annotations: {
+      readOnlyHint: false,
+      openWorldHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    _meta: {
+      ui: { visibility: ["model"] },
+      "openai/visibility": "private",
+      "openai/toolInvocation/invoking": "Updating companion behavior…",
+      "openai/toolInvocation/invoked": "Companion behavior updated",
+    },
+  },
+  async ({ enabled }) => {
+    if (!companionSocket) throw new Error("Task Plan companion is not configured for this plugin process.");
+    const response = await sendCompanion(companionSocket, { action: "set_focus_collapse", enabled });
+    return {
+      structuredContent: { enabled, state: response.state },
+      content: [{ type: "text", text: `Task Plan focus-collapse mode ${enabled ? "enabled" : "disabled"}.` }],
+    };
   },
 );
 

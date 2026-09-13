@@ -110,6 +110,10 @@ struct Saved: Codable {
     var selected: String?
     var creationWatermarks: [String: Int]?
     var windowFrame: WindowFrame? = nil
+    var expandedWindowFrame: WindowFrame? = nil
+    var collapsedWindowFrame: WindowFrame? = nil
+    var collapseWhenUnfocused: Bool? = nil
+    var retentionStartedAt: [String: String]? = nil
 }
 struct Command: Decodable {
     var action: String
@@ -121,6 +125,7 @@ struct Command: Decodable {
     var y: Double?
     var width: Double?
     var height: Double?
+    var enabled: Bool?
 }
 
 // All state transitions run on the AppKit main queue, including IPC updates.
@@ -130,6 +135,8 @@ final class Store: ObservableObject {
     @Published var eventCount = 0
     @Published var planSwitcherExpanded = false
     @Published var hoveredPlanID: String?
+    @Published var collapsed = false
+    @Published var collapsedHovered = false
     var creationWatermarks: [String: Int] = [:]
     var changed: (() -> Void)?
     var active: Plan? { plans.first { $0.id == selected } }
@@ -151,12 +158,15 @@ final class Store: ObservableObject {
             throw NSError(domain: "Invalid plan", code: 1)
         }
         if let index = plans.firstIndex(where: { $0.id == plan.id }) {
+            let becameCompleted = plans[index].status != "completed" && plan.status == "completed"
             if event && plan.revision <= plans[index].revision { return } // Durable replay ACK.
             guard plan.revision > plans[index].revision else { throw NSError(domain: "Stale revision", code: 2) }
-            plans[index] = plan // Updates/completion NEVER select a plan or activate a window.
+            plans[index] = plan
+            if becameCompleted { selected = plan.id }
         } else {
             plans.append(plan)
-            if !event { selected = plan.id }
+            if plan.status == "completed" { selected = plan.id }
+            else if !event { selected = plan.id }
             else if selectOnCreate, let source = plan.source, let sequence = plan.creationSequence,
                     sequence > creationWatermarks[source, default: 0] {
                 selected = plan.id; creationWatermarks[source] = sequence
@@ -454,15 +464,6 @@ struct ThinProgressBar: View {
     }
 }
 
-final class WindowDragView: NSView {
-    override var mouseDownCanMoveWindow: Bool { true }
-}
-
-struct WindowDragArea: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { WindowDragView() }
-    func updateNSView(_ nsView: NSView, context: Context) {}
-}
-
 struct StepHeadLayout: Layout {
     private struct Metrics {
         var title: CGSize
@@ -623,18 +624,105 @@ struct PlanEmojiCircle: View {
     var plan: Plan
     var size: CGFloat = 30
     var highlighted = false
+    var glyphSize: CGFloat = PanelMetrics.planIconGlyph
 
     var body: some View {
         ZStack {
             Circle().fill(highlighted ? Color.white.opacity(0.055) : .clear)
             Text(planEmoji(plan))
-                .font(.system(size: min(PanelMetrics.planIconGlyph, size * 0.75)))
+                .font(.system(size: min(glyphSize, size * 0.75)))
                 .multilineTextAlignment(.center)
                 .offset(y: 0.5)
         }
             .frame(width: size, height: size)
+            .overlay(alignment: .topTrailing) {
+                if plan.status == "completed" {
+                    PlanCompletionCheck(animationKey: plan.id + "|" + (plan.completedAt ?? "terminal"),
+                                        size: min(15, max(11, size * 0.36)))
+                        .offset(x: 2, y: -2)
+                }
+            }
             .contentShape(Circle())
             .accessibilityLabel(plan.title)
+    }
+}
+
+final class CompletionCheckAnimation: ObservableObject {
+    @Published var revealed = false
+}
+
+struct PlanCompletionCheck: View {
+    var animationKey: String
+    var size: CGFloat
+    @StateObject private var animation = CompletionCheckAnimation()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(.regularMaterial)
+                .frame(width: size, height: size)
+                .opacity(animation.revealed ? 0 : 0.92)
+                .blur(radius: animation.revealed ? 0 : 2.5)
+            Image(systemName: "checkmark")
+                .font(.system(size: size * 0.6, weight: .heavy))
+                .foregroundStyle(CodexPalette.statusGreen)
+                .scaleEffect(animation.revealed ? 1 : 0.35)
+                .opacity(animation.revealed ? 1 : 0.45)
+        }
+        .frame(width: size, height: size)
+        .id(animationKey)
+        .onAppear {
+            guard !animation.revealed else { return }
+            withAnimation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.68)) {
+                animation.revealed = true
+            }
+        }
+    }
+}
+
+struct CollapsedPlanView: View {
+    @ObservedObject var store: Store
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(CodexPalette.raised.opacity(store.collapsedHovered ? 0.92 : 0.68))
+                .overlay(Circle().stroke(CodexPalette.border.opacity(0.9), lineWidth: 0.8))
+                .scaleEffect(store.collapsedHovered ? 1.12 : 1)
+                .animation(.spring(response: 0.2, dampingFraction: 0.72), value: store.collapsedHovered)
+            if let active = store.active {
+                PlanEmojiCircle(plan: active, size: 38, highlighted: false, glyphSize: 27)
+                    .overlay(alignment: .bottomTrailing) {
+                        if store.plans.count > 1 {
+                            Text("+\(store.plans.count - 1)")
+                                .font(.system(size: 7, weight: .bold))
+                                .monospacedDigit()
+                                .foregroundStyle(CodexPalette.primary)
+                                .padding(.horizontal, 3)
+                                .frame(minWidth: 14, minHeight: 12)
+                                .background(Capsule().fill(CodexPalette.raised))
+                                .overlay(Capsule().stroke(CodexPalette.border, lineWidth: 0.6))
+                                .offset(x: 3, y: 3)
+                        }
+                    }
+            }
+        }
+        .padding(5)
+        .contentShape(Circle())
+        .preferredColorScheme(.dark)
+    }
+}
+
+struct CompanionRootView: View {
+    @ObservedObject var store: Store
+
+    @ViewBuilder var body: some View {
+        if store.collapsed {
+            CollapsedPlanView(store: store)
+        } else {
+            PanelView(store: store)
+        }
     }
 }
 
@@ -732,7 +820,6 @@ struct PanelView: View {
                 .padding(.top, PanelMetrics.inset)
                 .padding(.bottom, PanelMetrics.headerBottom)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(WindowDragArea())
                 Rectangle()
                     .fill(CodexPalette.border)
                     .frame(height: PanelMetrics.headerDivider)
@@ -895,9 +982,11 @@ final class PlanTooltipPanel {
 
 final class PanelHostingView<Content: View>: NSHostingView<Content> {
     let resizeCursorZoneCount = 8
+    var resizeEnabled = true
+    var windowDragEnabled = false
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override var mouseDownCanMoveWindow: Bool { false }
+    override var mouseDownCanMoveWindow: Bool { windowDragEnabled }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -910,6 +999,7 @@ final class PanelHostingView<Content: View>: NSHostingView<Content> {
     }
 
     func resizeCursorKind(at point: NSPoint) -> String? {
+        guard resizeEnabled else { return nil }
         let edge: CGFloat = 18
         let corner: CGFloat = 18
         guard bounds.contains(point) else { return nil }
@@ -980,6 +1070,7 @@ final class PanelHostingView<Content: View>: NSHostingView<Content> {
     override func resetCursorRects() {
         super.resetCursorRects()
         discardCursorRects()
+        guard resizeEnabled else { return }
         let edge: CGFloat = 18
         let corner: CGFloat = 18
         let horizontalWidth = max(0, bounds.width - corner * 2)
@@ -1000,7 +1091,7 @@ final class PanelHostingView<Content: View>: NSHostingView<Content> {
 final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let store = Store()
     var panel: PlanPanel!
-    var hostView: PanelHostingView<PanelView>!
+    var hostView: PanelHostingView<CompanionRootView>!
     var observers: [NSObjectProtocol] = []
     var localEventMonitor: Any?
     var dismissed = false
@@ -1009,6 +1100,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var socketPath = ""
     var dataURL: URL!
     var restoredFrame: WindowFrame?
+    var restoredExpandedFrame: WindowFrame?
+    var restoredCollapsedFrame: WindowFrame?
+    var expandedFrame: NSRect?
+    var collapsedFrame: NSRect?
+    var focusCollapseEnabled = false
+    var retentionStartedAt: [String: Date] = [:]
     let hostBundle = ProcessInfo.processInfo.environment["PLAN_COMPANION_HOST"] ?? "com.openai.codex"
     var lastVisibility: Bool?
     var expiryTimer: Timer?
@@ -1017,20 +1114,46 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var liveCursorKind: String?
     var suppressingFallbackResizeCursor = false
     var planHoverExitStartedAt: Date?
+    var collapsedHoverStartedAt: Date?
+    var expandedHoverExitStartedAt: Date?
+    var expandedFromIconSource: NSRect?
+    var expandedMovedBeyondSource = false
+    var applyingPresentationFrame = false
     let retentionSeconds = max(0.1, Double(ProcessInfo.processInfo.environment["PLAN_COMPANION_RETENTION_SECONDS"] ?? "") ?? 30)
+    let collapsedSize = NSSize(width: 52, height: 52)
+    let collapsedExpandDelay: TimeInterval = 0.32
 
     func terminalDate(_ plan: Plan) -> Date? {
         guard ["completed", "cancelled"].contains(plan.status ?? "") else { return nil }
         return parseISODate(plan.completedAt)
     }
 
+    func expiryDate(_ plan: Plan) -> Date? {
+        guard terminalDate(plan) != nil else { return nil }
+        if focusCollapseEnabled {
+            return retentionStartedAt[plan.id]?.addingTimeInterval(retentionSeconds)
+        }
+        return terminalDate(plan)?.addingTimeInterval(retentionSeconds)
+    }
+
+    @discardableResult func armTerminalRetention(at now: Date = Date()) -> Bool {
+        var changed = false
+        for plan in store.plans where terminalDate(plan) != nil && retentionStartedAt[plan.id] == nil {
+            retentionStartedAt[plan.id] = now
+            changed = true
+        }
+        if changed { scheduleExpiry(); try? persist(); journal("retention_armed") }
+        return changed
+    }
+
     @discardableResult func pruneExpiredPlans(at now: Date = Date()) -> Bool {
         let count = store.plans.count
         store.plans.removeAll { plan in
-            guard let terminal = terminalDate(plan) else { return false }
-            return now.timeIntervalSince(terminal) >= retentionSeconds
+            guard let expiry = expiryDate(plan) else { return false }
+            return now >= expiry
         }
         guard store.plans.count != count else { return false }
+        retentionStartedAt = retentionStartedAt.filter { id, _ in store.plans.contains(where: { $0.id == id }) }
         if let selected = store.selected, !store.plans.contains(where: { $0.id == selected }) {
             store.selected = store.plans.last?.id
         }
@@ -1040,13 +1163,13 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func scheduleExpiry() {
         expiryTimer?.invalidate(); expiryTimer = nil
         let now = Date()
-        let next = store.plans.compactMap(terminalDate).map { $0.addingTimeInterval(retentionSeconds) }
+        let next = store.plans.compactMap(expiryDate)
             .filter { $0 > now }.min()
         guard let next else { return }
         expiryTimer = Timer.scheduledTimer(withTimeInterval: max(0.05, next.timeIntervalSince(now)), repeats: false) { [weak self] _ in
             guard let self else { return }
             let removed = self.pruneExpiredPlans()
-            if removed { try? self.persist(); self.syncVisibility(); self.journal("plans_expired") }
+            if removed { try? self.persist(); self.syncPresentation(); self.journal("plans_expired") }
             self.scheduleExpiry()
         }
     }
@@ -1070,6 +1193,13 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 store.selected = saved.selected
                 store.creationWatermarks = saved.creationWatermarks ?? [:]
                 restoredFrame = saved.windowFrame
+                restoredExpandedFrame = saved.expandedWindowFrame ?? saved.windowFrame
+                restoredCollapsedFrame = saved.collapsedWindowFrame
+                focusCollapseEnabled = saved.collapseWhenUnfocused
+                    ?? (env["PLAN_COMPANION_FOCUS_COLLAPSE"] == "1")
+                retentionStartedAt = (saved.retentionStartedAt ?? [:]).compactMapValues(parseISODate)
+            } else {
+                focusCollapseEnabled = env["PLAN_COMPANION_FOCUS_COLLAPSE"] == "1"
             }
             try startSocket()
         } catch { fputs("Startup failed: \(error)\n", stderr); NSApp.terminate(nil); return }
@@ -1079,7 +1209,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.title = "Task Plan Companion"
         panel.delegate = self; panel.isReleasedWhenClosed = false
         panel.level = .floating; panel.hidesOnDeactivate = false; panel.becomesKeyOnlyIfNeeded = true
-        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.titleVisibility = .hidden; panel.titlebarAppearsTransparent = true
         panel.standardWindowButton(.closeButton)?.isHidden = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
@@ -1090,45 +1220,301 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.isOpaque = false
         panel.hasShadow = false
         panel.backgroundColor = .clear
-        hostView = PanelHostingView(rootView: PanelView(store: store))
+        hostView = PanelHostingView(rootView: CompanionRootView(store: store))
         panel.contentView = hostView
         panel.enableCursorRects()
         cursorTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
             self?.syncLiveResizeCursor()
             self?.syncPlanSwitcherHover()
+            self?.syncCollapsedHover()
+            self?.syncExpandedHoverExit()
         }
         cursorTimer?.tolerance = 1.0 / 120
         localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
             guard let self else { return event }
-            if self.panel.frame.contains(NSEvent.mouseLocation) {
+            let pointer = NSEvent.mouseLocation
+            if let selected = self.planSwitcherSelection(at: pointer) {
+                self.store.select(selected)
+                return nil
+            }
+            if self.panel.frame.contains(pointer), self.canBeginWindowDrag(at: pointer) {
+                self.panel.performDrag(with: event)
+                return nil
+            }
+            if !self.focusCollapseEnabled || NSWorkspace.shared.frontmostApplication?.bundleIdentifier == self.hostBundle,
+               !self.store.collapsed, self.panel.frame.contains(pointer) {
                 self.restoreHostFocusAfterPointerRelease()
             }
-            guard self.store.planSwitcherExpanded,
-                  let hovered = self.store.hoveredPlanID,
-                  hovered != self.store.selected else { return event }
-            self.store.select(hovered)
-            return nil
+            return event
         }
         store.changed = { [weak self] in self?.stateChanged() }
         let center = NSWorkspace.shared.notificationCenter
-        for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification] {
-            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.syncVisibility() })
-        }
-        if let frame = validRestoredFrame() {
+        observers.append(center.addObserver(forName: NSWorkspace.didActivateApplicationNotification,
+                                             object: nil, queue: .main) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            self?.syncPresentation(hostDidActivate: app?.bundleIdentifier == self?.hostBundle)
+        })
+        observers.append(center.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification,
+                                             object: nil, queue: .main) { [weak self] _ in
+            self?.syncPresentation()
+        })
+        if let frame = validRestoredExpandedFrame() {
+            expandedFrame = frame
             panel.setFrame(frame, display: false)
         } else if let screen = NSScreen.main {
             panel.setFrameTopLeftPoint(NSPoint(x: screen.visibleFrame.maxX - 430, y: screen.visibleFrame.maxY - 65))
+            expandedFrame = panel.frame
         }
+        collapsedFrame = validRestoredCollapsedFrame()
         if pruneExpiredPlans() { try? persist() }
         scheduleExpiry()
-        syncVisibility(); journal("started")
+        syncPresentation(); journal("started")
         print("READY \(socketPath)"); fflush(stdout)
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool { dismissed = true; panel.orderOut(nil); journal("dismissed"); return false }
-    func windowDidMove(_ notification: Notification) { try? persist() }
-    func windowDidResize(_ notification: Notification) { try? persist() }
+    func windowDidMove(_ notification: Notification) {
+        guard !applyingPresentationFrame else { return }
+        if store.collapsed {
+            collapsedFrame = panel.frame
+        } else {
+            expandedFrame = panel.frame
+            if let source = expandedFromIconSource {
+                let icon = planIconFrame(in: panel.frame)
+                if expandedMovedBeyondSource || !icon.intersects(source) {
+                    expandedMovedBeyondSource = true
+                    collapsedFrame = clampedCollapsedFrame(centeredAt: NSPoint(x: icon.midX, y: icon.midY))
+                }
+            }
+        }
+        try? persist()
+    }
+    func windowDidResize(_ notification: Notification) {
+        guard !applyingPresentationFrame, !store.collapsed else { return }
+        expandedFrame = panel.frame
+        try? persist()
+    }
+
+    func planIconFrame(in frame: NSRect) -> NSRect {
+        NSRect(x: frame.minX + PanelMetrics.inset,
+               y: frame.maxY - PanelMetrics.inset - PanelMetrics.iconColumn,
+               width: PanelMetrics.iconColumn, height: PanelMetrics.iconColumn)
+    }
+
+    func canBeginWindowDrag(at point: NSPoint) -> Bool {
+        guard panel.frame.contains(point) else { return false }
+        if store.collapsed { return true }
+        let local = hostView.convert(panel.convertPoint(fromScreen: point), from: nil)
+        guard hostView.resizeCursorKind(at: local) == nil else { return false }
+
+        // The plan icon strip remains interactive; every other non-resize part of
+        // this read-only panel is a dependable drag surface, including title text.
+        let iconOriginX = panel.frame.minX + PanelMetrics.inset
+        let iconOriginY = panel.frame.maxY - PanelMetrics.inset - PanelMetrics.iconColumn - 6
+        let planCount = max(1, store.plans.count)
+        let stripWidth = PanelMetrics.iconColumn + 8
+            + (store.planSwitcherExpanded ? CGFloat(planCount - 1) * (PanelMetrics.iconColumn + 4) : 0)
+        let iconStrip = NSRect(x: iconOriginX - 4, y: iconOriginY,
+                               width: stripWidth, height: PanelMetrics.iconColumn + 12)
+        return !iconStrip.contains(point)
+    }
+
+    func planSwitcherSelection(at point: NSPoint) -> String? {
+        guard !store.collapsed, store.planSwitcherExpanded else { return nil }
+        let otherPlans = store.plans.filter { $0.id != store.selected }
+        guard !otherPlans.isEmpty else { return nil }
+        let stride = PanelMetrics.iconColumn + 4
+        let firstX = panel.frame.minX + PanelMetrics.inset + stride
+        let zoneY = panel.frame.maxY - PanelMetrics.inset - PanelMetrics.iconColumn - 6
+        guard point.y >= zoneY, point.y <= zoneY + PanelMetrics.iconColumn + 12,
+              point.x >= firstX else { return nil }
+        let index = Int((point.x - firstX) / stride)
+        guard otherPlans.indices.contains(index) else { return nil }
+        let itemX = firstX + CGFloat(index) * stride
+        guard point.x <= itemX + PanelMetrics.iconColumn else { return nil }
+        return otherPlans[index].id
+    }
+
+    func screenFor(_ frame: NSRect) -> NSScreen? {
+        NSScreen.screens.first(where: { $0.visibleFrame.intersects(frame) }) ?? NSScreen.main
+    }
+
+    func clamped(_ frame: NSRect, to visible: NSRect) -> NSRect {
+        var result = frame
+        result.size.width = min(result.width, visible.width)
+        result.size.height = min(result.height, visible.height)
+        result.origin.x = min(max(result.minX, visible.minX), visible.maxX - result.width)
+        result.origin.y = min(max(result.minY, visible.minY), visible.maxY - result.height)
+        return result
+    }
+
+    func clampedCollapsedFrame(centeredAt center: NSPoint) -> NSRect {
+        let candidate = NSRect(x: center.x - collapsedSize.width / 2,
+                               y: center.y - collapsedSize.height / 2,
+                               width: collapsedSize.width, height: collapsedSize.height)
+        let visible = screenFor(candidate)?.visibleFrame ?? candidate
+        return clamped(candidate, to: visible)
+    }
+
+    func defaultCollapsedFrame() -> NSRect {
+        let source = expandedFrame ?? panel.frame
+        let icon = planIconFrame(in: source)
+        return clampedCollapsedFrame(centeredAt: NSPoint(x: icon.midX, y: icon.midY))
+    }
+
+    func fittedExpandedFrame(near iconFrame: NSRect? = nil) -> NSRect {
+        let candidate = expandedFrame ?? panel.frame
+        let screen = screenFor(iconFrame ?? candidate) ?? NSScreen.main
+        return screen.map { clamped(candidate, to: $0.visibleFrame) } ?? candidate
+    }
+
+    func applyPresentationFrame(_ frame: NSRect, animated: Bool) {
+        applyingPresentationFrame = true
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                panel.animator().setFrame(frame, display: true)
+            } completionHandler: { [weak self] in self?.applyingPresentationFrame = false }
+        } else {
+            panel.setFrame(frame, display: true)
+            DispatchQueue.main.async { [weak self] in self?.applyingPresentationFrame = false }
+        }
+    }
+
+    func collapseToIcon(animated: Bool = false) {
+        guard store.active != nil else { panel.orderOut(nil); return }
+        if !store.collapsed { expandedFrame = panel.frame }
+        let target = collapsedFrame ?? defaultCollapsedFrame()
+        collapsedFrame = target
+        expandedFromIconSource = nil
+        expandedMovedBeyondSource = false
+        expandedHoverExitStartedAt = nil
+        store.planSwitcherExpanded = false
+        store.hoveredPlanID = nil
+        planTooltip.hide(animated: true)
+        store.collapsed = true
+        hostView.resizeEnabled = false
+        hostView.windowDragEnabled = true
+        panel.minSize = collapsedSize
+        panel.alphaValue = 0.82
+        panel.orderFrontRegardless()
+        applyPresentationFrame(target, animated: animated)
+        try? persist()
+        journal("collapsed")
+    }
+
+    func expandForHost(animated: Bool = true) {
+        guard store.active != nil else { panel.orderOut(nil); return }
+        let source = store.collapsed ? panel.frame : nil
+        store.collapsed = false
+        store.collapsedHovered = false
+        collapsedHoverStartedAt = nil
+        expandedFromIconSource = nil
+        expandedMovedBeyondSource = false
+        expandedHoverExitStartedAt = nil
+        hostView.resizeEnabled = true
+        hostView.windowDragEnabled = false
+        panel.minSize = NSSize(width: 280, height: 240)
+        panel.alphaValue = 1
+        panel.orderFrontRegardless()
+        applyPresentationFrame(fittedExpandedFrame(near: source), animated: animated && source != nil)
+        try? persist()
+        journal("expanded_host")
+    }
+
+    func expandFromCollapsedIcon() {
+        guard store.collapsed, store.active != nil else { return }
+        let source = panel.frame
+        collapsedFrame = source
+        store.collapsed = false
+        store.collapsedHovered = false
+        collapsedHoverStartedAt = nil
+        expandedFromIconSource = source
+        expandedMovedBeyondSource = false
+        expandedHoverExitStartedAt = nil
+        hostView.resizeEnabled = true
+        hostView.windowDragEnabled = false
+        panel.minSize = NSSize(width: 280, height: 240)
+        panel.alphaValue = 1
+        panel.orderFrontRegardless()
+        applyPresentationFrame(fittedExpandedFrame(near: source), animated: true)
+        armTerminalRetention()
+        try? persist()
+        journal("expanded_hover")
+    }
+
+    func syncPresentation(hostDidActivate: Bool = false) {
+        guard panel != nil else { return }
+        guard store.active != nil, !dismissed else {
+            panel.orderOut(nil)
+            if lastVisibility != false { lastVisibility = false; journal("visibility") }
+            return
+        }
+        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        if !focusCollapseEnabled {
+            let companion = Bundle.main.bundleIdentifier
+            let visible = front == hostBundle || front == companion
+            store.collapsed = false
+            hostView.resizeEnabled = true
+            hostView.windowDragEnabled = false
+            panel.minSize = NSSize(width: 280, height: 240)
+            panel.alphaValue = 1
+            if visible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
+            if visible != lastVisibility { lastVisibility = visible; journal("visibility") }
+            return
+        }
+        if front == hostBundle || hostDidActivate {
+            if hostDidActivate { armTerminalRetention() }
+            expandForHost(animated: store.collapsed)
+        } else if expandedFromIconSource != nil {
+            panel.orderFrontRegardless()
+        } else {
+            collapseToIcon(animated: false)
+        }
+        let visible = panel.isVisible
+        if visible != lastVisibility { lastVisibility = visible; journal("visibility") }
+    }
+
+    func syncCollapsedHover() {
+        guard focusCollapseEnabled, store.collapsed, panel.isVisible, store.active != nil else {
+            if store.collapsedHovered { store.collapsedHovered = false }
+            collapsedHoverStartedAt = nil
+            return
+        }
+        let hovering = panel.frame.insetBy(dx: -5, dy: -5).contains(NSEvent.mouseLocation)
+        guard hovering else {
+            if store.collapsedHovered { store.collapsedHovered = false }
+            collapsedHoverStartedAt = nil
+            return
+        }
+        if !store.collapsedHovered {
+            store.collapsedHovered = true
+            collapsedHoverStartedAt = Date()
+            return
+        }
+        guard let started = collapsedHoverStartedAt,
+              Date().timeIntervalSince(started) >= collapsedExpandDelay else { return }
+        expandFromCollapsedIcon()
+    }
+
+    func syncExpandedHoverExit() {
+        guard focusCollapseEnabled, !store.collapsed, expandedFromIconSource != nil,
+              NSWorkspace.shared.frontmostApplication?.bundleIdentifier != hostBundle else {
+            expandedHoverExitStartedAt = nil
+            return
+        }
+        if NSEvent.pressedMouseButtons & 1 != 0 { expandedHoverExitStartedAt = nil; return }
+        let pointer = NSEvent.mouseLocation
+        let interactive = panel.frame.insetBy(dx: -6, dy: -6).contains(pointer)
+            || (planTooltip.isVisible && planTooltip.hoverRegion.contains(pointer))
+        if interactive { expandedHoverExitStartedAt = nil; return }
+        if expandedHoverExitStartedAt == nil { expandedHoverExitStartedAt = Date(); return }
+        guard Date().timeIntervalSince(expandedHoverExitStartedAt!) >= 0.28 else { return }
+        collapseToIcon(animated: true)
+    }
+
     func liveResizeCursorKind(at point: NSPoint) -> String? {
-        guard panel?.isVisible == true else { return nil }
+        guard panel?.isVisible == true, !store.collapsed else { return nil }
         let frame = panel.frame
         let edge: CGFloat = 18
         let corner: CGFloat = 18
@@ -1150,6 +1536,14 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return nil
     }
     func syncLiveResizeCursor() {
+        if store.collapsed {
+            if liveCursorKind != nil || suppressingFallbackResizeCursor {
+                liveCursorKind = nil
+                suppressingFallbackResizeCursor = false
+                NSCursor.arrow.set()
+            }
+            return
+        }
         let point = NSEvent.mouseLocation
         let kind = liveResizeCursorKind(at: point)
         if let kind {
@@ -1180,7 +1574,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
     func syncPlanSwitcherHover() {
-        guard panel?.isVisible == true, let active = store.active, store.plans.count > 1 else {
+        guard panel?.isVisible == true, !store.collapsed, let active = store.active, store.plans.count > 1 else {
             planTooltip.hide()
             planHoverExitStartedAt = nil
             if store.hoveredPlanID != nil { store.hoveredPlanID = nil }
@@ -1275,30 +1669,38 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         do { try persist() }
         catch { journal("persist_failed") }
         scheduleExpiry()
-        syncVisibility(); journal("state_changed")
+        syncPresentation(); journal("state_changed")
     }
     func persist() throws {
-        let frame = panel?.frame
-        let savedFrame = frame.map { WindowFrame(x: $0.minX, y: $0.minY, width: $0.width, height: $0.height) }
+        let currentExpanded = expandedFrame ?? (!store.collapsed ? panel?.frame : nil)
+        let savedExpanded = currentExpanded.map { WindowFrame(x: $0.minX, y: $0.minY, width: $0.width, height: $0.height) }
+        let currentCollapsed = collapsedFrame ?? (store.collapsed ? panel?.frame : nil)
+        let savedCollapsed = currentCollapsed.map { WindowFrame(x: $0.minX, y: $0.minY, width: $0.width, height: $0.height) }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let savedRetention = retentionStartedAt.mapValues { formatter.string(from: $0) }
         try JSONEncoder().encode(Saved(plans: store.plans, selected: store.selected,
-                                      creationWatermarks: store.creationWatermarks, windowFrame: savedFrame ?? restoredFrame))
+                                      creationWatermarks: store.creationWatermarks,
+                                      windowFrame: savedExpanded ?? restoredExpandedFrame ?? restoredFrame,
+                                      expandedWindowFrame: savedExpanded ?? restoredExpandedFrame,
+                                      collapsedWindowFrame: savedCollapsed ?? restoredCollapsedFrame,
+                                      collapseWhenUnfocused: focusCollapseEnabled,
+                                      retentionStartedAt: savedRetention))
             .write(to: dataURL.appendingPathComponent("state.json"), options: .atomic)
     }
-    func validRestoredFrame() -> NSRect? {
-        guard let saved = restoredFrame,
+    func validRestoredExpandedFrame() -> NSRect? {
+        guard let saved = restoredExpandedFrame ?? restoredFrame,
               [saved.x, saved.y, saved.width, saved.height].allSatisfy({ $0.isFinite }),
               saved.width >= panel.minSize.width, saved.height >= panel.minSize.height else { return nil }
         let frame = NSRect(x: saved.x, y: saved.y, width: saved.width, height: saved.height)
         return NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }) ? frame : nil
     }
-    func syncVisibility() {
-        guard panel != nil else { return }
-        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        let companion = Bundle.main.bundleIdentifier
-        let ownsCompanionFocus = front == companion
-        let visible = (front == hostBundle || ownsCompanionFocus) && store.active != nil && !dismissed
-        if visible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
-        if visible != lastVisibility { lastVisibility = visible; journal("visibility") }
+    func validRestoredCollapsedFrame() -> NSRect? {
+        guard let saved = restoredCollapsedFrame,
+              [saved.x, saved.y, saved.width, saved.height].allSatisfy({ $0.isFinite }) else { return nil }
+        let center = NSPoint(x: saved.x + saved.width / 2, y: saved.y + saved.height / 2)
+        let frame = clampedCollapsedFrame(centeredAt: center)
+        return NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }) ? frame : nil
     }
     func snapshot() -> [String: Any] {
         let frame = panel?.frame ?? .zero
@@ -1390,6 +1792,16 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "completedAgentCheck": "green-no-background",
                                      "completedAgentCheckAnimation": "pop-then-periodic-rock",
                                      "completedPlanRetentionSeconds": retentionSeconds,
+                                     "focusCollapseEnabled": focusCollapseEnabled,
+                                     "presentation": store.collapsed ? "collapsed" : "expanded",
+                                     "collapsedHovered": store.collapsedHovered,
+                                     "collapsedExpandDelay": collapsedExpandDelay,
+                                     "collapsedOpacity": 0.82,
+                                     "collapsedPositionPersistence": "state.json:collapsedWindowFrame",
+                                     "expandedPositionPersistence": "state.json:expandedWindowFrame",
+                                     "completionRetentionTrigger": focusCollapseEnabled ? "host-focus-or-icon-expand" : "completion-time",
+                                     "completedPlanCheck": "green-pop-with-dissolving-material-blur",
+                                     "windowDragSurface": "all-content-except-resize-and-plan-switcher",
                                      "pendingStepAlignment": "reserved-column",
                                      "noteAnimation": "blur-fade-rise-on-insert-and-change",
                                      "noteTopSpacing": 3,
@@ -1412,6 +1824,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "visible": panel?.isVisible ?? false,
                 "frontmostBundle": NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown",
                 "eventCount": store.eventCount, "selectedRevision": store.active?.revision ?? 0,
+                "activeStatus": store.active?.status ?? NSNull(),
+                "retentionArmedPlanIDs": Array(retentionStartedAt.keys).sorted(),
+                "expandedWindowFrame": expandedFrame.map { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] } ?? NSNull(),
+                "collapsedWindowFrame": collapsedFrame.map { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] } ?? NSNull(),
                 "plans": plans, "binding": "manual-selector", "hostBundle": hostBundle,
                 "dismissed": dismissed, "window": window]
     }
@@ -1439,7 +1855,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     store.plans = oldPlans; store.selected = oldSelected; store.creationWatermarks = oldWatermarks; store.eventCount = oldCount
                     throw error
                 }
-                scheduleExpiry(); syncVisibility(); journal("event_applied")
+                scheduleExpiry(); syncPresentation(); journal("event_applied")
             case "upsert":
                 guard let plan = command.plan else { throw NSError(domain: "Missing plan", code: 3) }
                 try store.upsert(plan)
@@ -1449,8 +1865,23 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             case "remove":
                 guard let id = command.id, store.plans.contains(where: { $0.id == id }) else { throw NSError(domain: "Unknown plan", code: 4) }
                 store.plans.removeAll { $0.id == id }
+                retentionStartedAt.removeValue(forKey: id)
                 if store.selected == id { store.selected = store.plans.last?.id }
                 stateChanged()
+            case "set_focus_collapse":
+                guard let enabled = command.enabled else { throw NSError(domain: "Missing enabled preference", code: 13) }
+                focusCollapseEnabled = enabled
+                if enabled {
+                    retentionStartedAt = retentionStartedAt.filter { id, _ in store.plans.contains(where: { $0.id == id }) }
+                } else {
+                    retentionStartedAt.removeAll()
+                    expandedFromIconSource = nil
+                    expandedMovedBeyondSource = false
+                }
+                try persist()
+                scheduleExpiry()
+                syncPresentation()
+                journal("focus_collapse_preference")
             case "set_frame":
                 guard let x = command.x, let y = command.y, let width = command.width, let height = command.height,
                       [x, y, width, height].allSatisfy({ $0.isFinite }),
@@ -1458,6 +1889,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     throw NSError(domain: "Invalid window frame", code: 8)
                 }
                 panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: false)
+                expandedFrame = panel.frame
                 try persist()
             case "cursor_probe":
                 guard let x = command.x, let y = command.y else { throw NSError(domain: "Missing cursor probe point", code: 9) }

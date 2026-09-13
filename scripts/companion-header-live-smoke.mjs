@@ -145,7 +145,7 @@ CGWarpMouseCursorPosition(point(${iconX}, ${iconY}))
 usleep(300000)
 let alternate = point(${firstAlternativeX}, ${iconY})
 CGWarpMouseCursorPosition(alternate)
-usleep(500000)
+usleep(800000)
 CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: alternate, mouseButton: .left)!.post(tap: .cghidEventTap)
 usleep(70000)
 CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: alternate, mouseButton: .left)!.post(tap: .cghidEventTap)
@@ -153,6 +153,11 @@ usleep(500000)
 CGWarpMouseCursorPosition(old)
 `], { stdio: ['ignore', 'pipe', 'pipe'] });
   const clickerExit = once(clicker, 'exit');
+  await eventually(async () => {
+    const current = (await sendCompanion(socket, { action: 'status' })).state;
+    if (current.hoveredPlanID === 'plan-1' && current.planSwitcherExpanded) return true;
+    return false;
+  });
   await eventually(async () => (await sendCompanion(socket, { action: 'status' })).state.selected === 'plan-1');
   assert.equal((await clickerExit)[0], 0);
   const final = (await sendCompanion(socket, { action: 'status' })).state;

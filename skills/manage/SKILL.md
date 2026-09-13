@@ -34,6 +34,10 @@ Only the main agent uses this plugin. If you are a delegated subagent, do not ca
 
 Do not create a plan merely to answer a question, inspect one file, or perform a trivial edit. Keep step titles compact and do not expose internal reasoning.
 
+## Companion preference
+
+When the native companion is configured, `set_companion_focus_mode` controls its persisted focus behavior. Call it only when the user explicitly asks to enable or disable collapsing the expanded plan window into a draggable icon while Codex is unfocused. Do not treat installation or ordinary plan creation as consent to change this preference.
+
 ## Agent work categories
 
 Use one category for the current assignment, not for the agent's name or permanent persona. Choose its primary deliverable; reclassify only when its actual assignment changes, not on every progress update. Multiple agents on a step may have different categories. Never add fictional agents to display icons. For legacy assignments whose task is unknown, omit `category` and keep the neutral icon.

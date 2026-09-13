@@ -35,6 +35,7 @@ try {
     "record_task_plan_output",
     "get_task_plan",
     "show_task_plan",
+    "set_companion_focus_mode",
     "cancel_task_plan",
   ]) {
     if (!names.has(name)) throw new Error(`Missing tool: ${name}`);

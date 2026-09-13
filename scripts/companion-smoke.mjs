@@ -179,9 +179,9 @@ try {
   assert.equal(state.plans.find(p=>p.id===aid).steps[0].agents[0].category,'testing');
   checks.push('progress notes workers delivered without selection change');
   for (const step_id of ['step-1','step-2']) update=await call(a,'update_task_plan_step',{plan_id:aid,step_id,status:'completed',agents:[{name:'worker',category:'testing',status:'completed'}]});
-  state=await delivered(aid,update.revision); assert.equal(state.selected,bid);
+  state=await delivered(aid,update.revision); assert.equal(state.selected,aid);
   assert.equal(state.plans.find(p=>p.id===aid).status,'completed');
-  checks.push('background completion preserves selected plan');
+  checks.push('newly completed plan becomes selected immediately');
   await sendCompanion(socket,{action:'select',id:aid});
   const priorEvents=(await sendCompanion(socket,{action:'status'})).state.eventCount;
   await call(a,'record_task_plan_output',{plan_id:bid,points:1});
