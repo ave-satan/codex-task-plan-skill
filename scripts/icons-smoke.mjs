@@ -23,6 +23,8 @@ try {
   const categorySchema = tools.find(t => t.name === "update_task_plan_step")
     .inputSchema.properties.agents.items.properties.category;
   assert.deepEqual(categorySchema.enum, expected);
+  const statusSchema = tools.find(t => t.name === "update_task_plan_step").inputSchema.properties.status;
+  assert.ok(statusSchema.enum.includes("waiting_for_user"));
   let plan = await call("create_task_plan", { title: "Иконки агентов · синтетическая проверка",
     steps: expected.map(id => `Проверить категорию ${id}`) });
   for (let i = 0; i < expected.length; i++) {
@@ -49,7 +51,21 @@ try {
   const fixturePlan = structuredClone(plan);
   const completed = await call("update_task_plan_step", { plan_id: plan.id,
     step_id: "step-1", status: "completed" });
-  assert.deepEqual(completed.steps[0].agents, []);
+  assert.deepEqual(completed.steps[0].agents, [{ name: "researcher", category: "research", status: "completed" }]);
+  const mixed = await call("update_task_plan_step", {plan_id: plan.id, step_id: "step-2", status: "in_progress",
+    agents: [{name:"finished",category:"review",status:"completed"},{name:"running",category:"testing",status:"working"}]});
+  assert.equal(mixed.steps[1].agents[0].status,"completed");
+  assert.equal(mixed.steps[1].agents[1].status,"working");
+  const guard = await call("create_task_plan", {title:"Completed agents are not concurrency",steps:["Main","Other"]});
+  await call("update_task_plan_step", {plan_id:guard.id,step_id:"step-1",status:"in_progress"});
+  const question = await call("update_task_plan_step", {plan_id:guard.id,step_id:"step-1",
+    status:"waiting_for_user",note:"Какой вариант выбрать?"});
+  assert.equal(question.steps[0].status,"waiting_for_user");
+  assert.equal(question.steps[0].note,"Какой вариант выбрать?");
+  assert.equal(question.finished,0);
+  await call("update_task_plan_step", {plan_id:guard.id,step_id:"step-1",status:"in_progress"});
+  const denied = await client.callTool({name:"update_task_plan_step",arguments:{plan_id:guard.id,step_id:"step-2",status:"in_progress",agents:[{name:"done",status:"completed"}]}});
+  assert.equal(denied.isError,true);
 
   // Linked steps keep agent categories while deriving their own progress.
   const child = await call("create_task_plan", { title: "Child", steps: ["A", "B"],
@@ -64,6 +80,8 @@ try {
   assert.equal(resource.contents[0]._meta?.["openai/widgetMinFrameHeight"], 0);
   const html = resource.contents[0].text;
   assert.ok(html.includes('class="status-gear"'));
+  assert.ok(html.includes('waiting_for_user: { icon: "?", text: "Нужен ответ" }'));
+  assert.ok(html.includes('.waiting_for_user .status { color: var(--question); animation: question-breathe 2.8s ease-in-out infinite;'));
   assert.ok(html.includes('.step-head .progress { grid-row: 2; }'));
   assert.ok(html.includes('.goal-stopped .status-gear { animation-play-state: paused; }'));
   assert.ok(!html.includes('.in_progress .agent { animation:'));
@@ -80,6 +98,7 @@ try {
   assert.ok(html.includes('@keyframes agent-breathe { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }'));
   assert.ok(!html.includes('@keyframes agent-pulse'));
   assert.ok(html.includes('agent.style.setProperty("--agent-phase"'));
+  assert.ok(html.includes('.in_progress .agent[data-status="completed"] > img { animation: none; opacity: 1; transform: none; }'));
   assert.ok(html.includes('icon.width = 24;'));
   assert.ok(html.includes('`${categoryIcon?.label ?? "Субагент"} · ${displayName}`'));
   const header = html.match(/class="plan-icon"[^>]*><img src="data:image\/png;base64,([^"]+)"/);

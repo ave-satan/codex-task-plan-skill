@@ -78,7 +78,7 @@ try {
   const resource = await client.readResource({ uri });
   const html = resource.contents[0];
   if (html?.mimeType !== "text/html;profile=mcp-app") throw new Error("Unexpected UI MIME type");
-  for (const marker of ["get_task_plan", "progress", "`${textWidth}px`", "alignProgressBars", "previousProgress", "progress-glint", "targetProgress", "cubic-bezier(.22, .8, .3, 1)", "item.agents", "data-tooltip", "agent.dataset.tooltip", "Готово", "async function bootstrap", "await fetchLatestPlan()", "plan.revision < lastRevision", "shell.classList.add(\"ready\")"]) {
+  for (const marker of ["get_task_plan", "progress", "`${textWidth}px`", "alignProgressBars", "previousProgress", "progress-glint", "targetProgress", "cubic-bezier(.22, .8, .3, 1)", "item.agents", "data-tooltip", "agent.dataset.tooltip", "Готово", "waiting_for_user", "Нужен ответ", "async function bootstrap", "await fetchLatestPlan()", "plan.revision < lastRevision", "shell.classList.add(\"ready\")"]) {
     if (!html.text?.includes(marker)) throw new Error(`Widget marker missing: ${marker}`);
   }
   for (const marker of ["requestClose", "closeTimer", "setTimeout", "aria-expanded", "id=\"toggle\"", "chevron", "status.title", "agent.title", ".step.in_progress { background", ".step.blocked { background", "Math.min(280", "if (initialPlan) render(initialPlan);\n      planId"] ) {
@@ -91,8 +91,8 @@ try {
     throw new Error("Progress bar must render before the step note");
   }
 
-  const skill = await readFile(join(root, "skills/task-plan/SKILL.md"), "utf8");
-  for (const marker of ["create_goal", "update_goal", "Set the goal objective to the plan title exactly", "Never recreate or update the goal", "revise_task_plan", "instead of creating a replacement", "record_task_plan_output", "should_show: true", "score reaches 4", "progress has changed", "Keep exactly one ordinary main-agent step active", "parallel_activity", "do not qualify as parallel work"]) {
+  const skill = await readFile(join(root, "skills/manage/SKILL.md"), "utf8");
+  for (const marker of ["create_goal", "update_goal", "Set the goal objective to the plan title exactly", "Never recreate or update the goal", "revise_task_plan", "instead of creating a replacement", "record_task_plan_output", "should_show: true", "score reaches 4", "progress has changed", "Keep exactly one ordinary main-agent step active", "parallel_activity", "do not qualify as parallel work", "waiting_for_user", "direct answer or decision"]) {
     if (!skill.includes(marker)) throw new Error(`Goal lifecycle instruction missing: ${marker}`);
   }
   for (const marker of ["▤ <plan title>", "<total> этапов", "Готово, когда все этапы"]) {
@@ -183,7 +183,7 @@ try {
     name: "update_task_plan_step",
     arguments: { plan_id: planId, step_id: "step-1", status: "completed" },
   });
-  if (firstCompleted.structuredContent?.plan?.steps?.[0]?.agents?.length !== 0) {
+  if (firstCompleted.structuredContent?.plan?.steps?.[0]?.agents?.some(agent => agent.status !== "completed")) {
     throw new Error("Completed step retained active subagents");
   }
   const completed = await callWithSnapshot(client, {
@@ -201,10 +201,30 @@ try {
     throw new Error("Completed plan was not retained");
   }
 
+  for (const request of [
+    { name: "revise_task_plan", arguments: { plan_id: planId, add_steps: ["New work"] } },
+    { name: "revise_task_plan", arguments: { plan_id: planId, title: "Reused plan" } },
+    { name: "update_task_plan_step", arguments: { plan_id: planId, step_id: "step-1", status: "in_progress" } },
+    { name: "cancel_task_plan", arguments: { plan_id: planId } },
+  ]) {
+    const rejected = await callWithSnapshot(client, request);
+    if (!rejected.isError || !JSON.stringify(rejected.content).includes("read-only")) {
+      throw new Error(`Completed plan mutation was not rejected: ${request.name}`);
+    }
+  }
+  const unchanged = await callWithSnapshot(client, { name: "get_task_plan", arguments: { plan_id: planId } });
+  if (JSON.stringify(unchanged.structuredContent.plan) !== JSON.stringify(retained.structuredContent.plan)) {
+    throw new Error("Rejected mutations changed completed plan history");
+  }
+  const fresh = await callWithSnapshot(client, {
+    name: "create_task_plan", arguments: { title: "Fresh revision plan", steps: ["First", "Second"] },
+  });
+  const revisionPlanId = fresh.structuredContent.plan.id;
+  if (revisionPlanId === planId) throw new Error("New work reused the completed plan ID");
   const revised = await callWithSnapshot(client, {
     name: "revise_task_plan",
     arguments: {
-      plan_id: planId,
+      plan_id: revisionPlanId,
       title: "Revised smoke plan",
       rename_steps: [{ step_id: "step-1", title: "Renamed first" }],
       add_steps: ["New scope"],
@@ -212,21 +232,26 @@ try {
   });
   const addedStepId = revised.structuredContent?.added_steps?.[0]?.id;
   if (revised.structuredContent?.plan?.title !== "Revised smoke plan" || revised.structuredContent?.plan?.status !== "active" || revised.structuredContent?.plan?.total !== 3 || !addedStepId) {
-    throw new Error("Plan revision did not rename, add, and reopen as expected");
+    throw new Error("Active plan revision did not rename and add as expected");
   }
   const reordered = await callWithSnapshot(client, {
     name: "revise_task_plan",
     arguments: {
-      plan_id: planId,
+      plan_id: revisionPlanId,
       order: [addedStepId, "step-1", "step-2"],
     },
   });
   if (reordered.structuredContent?.plan?.steps?.[0]?.id !== addedStepId) {
     throw new Error("Plan steps were not reordered");
   }
+  for (const stepId of ["step-1", "step-2"]) {
+    await callWithSnapshot(client, { name: "update_task_plan_step", arguments: {
+      plan_id: revisionPlanId, step_id: stepId, status: "completed",
+    } });
+  }
   const trimmed = await callWithSnapshot(client, {
     name: "revise_task_plan",
-    arguments: { plan_id: planId, remove_step_ids: [addedStepId] },
+    arguments: { plan_id: revisionPlanId, remove_step_ids: [addedStepId] },
   });
   if (trimmed.structuredContent?.plan?.status !== "completed" || trimmed.structuredContent?.plan?.total !== 2) {
     throw new Error("Removing a pending revision step did not restore completion");
@@ -311,26 +336,14 @@ try {
     name: "revise_task_plan",
     arguments: { plan_id: childBId, add_steps: ["B3"] },
   });
-  const childAddedStepId = childRevised.structuredContent?.added_steps?.[0]?.id;
-  parent = await callWithSnapshot(client, {
-    name: "get_task_plan",
-    arguments: { plan_id: parentId },
-  });
-  linkedStep = parent.structuredContent?.plan?.steps?.[0];
-  if (linkedStep?.status !== "in_progress" || linkedStep?.progress !== 84) {
-    throw new Error(`Revised subplan did not reopen parent progress: ${linkedStep?.progress}`);
-  }
-  await callWithSnapshot(client, {
-    name: "revise_task_plan",
-    arguments: { plan_id: childBId, remove_step_ids: [childAddedStepId] },
-  });
+  if (!childRevised.isError) throw new Error("Completed subplan was reopened");
   parent = await callWithSnapshot(client, {
     name: "get_task_plan",
     arguments: { plan_id: parentId },
   });
   linkedStep = parent.structuredContent?.plan?.steps?.[0];
   if (linkedStep?.status !== "completed" || linkedStep?.progress !== 100) {
-    throw new Error("Removing revised subplan scope did not restore parent completion");
+    throw new Error("Rejected subplan revision changed parent completion");
   }
 
   const blockedParentCreated = await callWithSnapshot(client, {

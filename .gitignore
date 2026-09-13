@@ -1,6 +1,4 @@
-node_modules/
 .DS_Store
-*.sqlite
-*.sqlite-*
-.env
-.env.*
+node_modules/
+companion/build/module-cache/
+*.log

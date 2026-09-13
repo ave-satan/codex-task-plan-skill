@@ -24,16 +24,29 @@ const widgetHtml = (await readFile(join(root, "widget.html"), "utf8"))
 const widgetUri = "ui://codex-task-plan/plan.html";
 const plans = new Map();
 const store = openPlanStore();
+const companionMode = Boolean(process.env.TASK_PLAN_COMPANION_SOCKET);
 function registerAppTool(server, name, config, handler) {
-  return registerTool(server, name, config, (...args) => store.run(plans, () => handler(...args)));
+  return registerTool(server, name, config, (...args) => store.run(plans, () => {
+    if (["update_task_plan_step", "revise_task_plan", "cancel_task_plan"].includes(name)) {
+      let plan = requirePlan(args[0].plan_id);
+      while (plan) {
+        if (plan.status === "completed") {
+          throw new Error("Completed task plans are read-only. Create a new plan for new work; do not reuse or reopen a completed plan.");
+        }
+        plan = plan.parentPlanId ? requirePlan(plan.parentPlanId) : null;
+      }
+    }
+    return handler(...args);
+  }, name === 'show_task_plan' ? args[0].plan_id : null));
 }
 const reanchorThreshold = 4;
 
-const statuses = ["pending", "in_progress", "completed", "blocked", "skipped"];
+const statuses = ["pending", "in_progress", "waiting_for_user", "completed", "blocked", "skipped"];
 const agentSchema = z.object({
   name: z.string().min(1).max(80),
+  status: z.enum(["working", "completed"]).optional().describe("Assignment state, maintained by the main agent. Set completed when this subagent finishes; its icon stays still. Omitted means working for legacy entries."),
   category: z.enum(workCategoryIds).optional().describe(
-    "Choose one category from the actual delegated task, not the agent name, without an extra model call. "
+    "Choose by the current assignment's primary deliverable, not the agent name or a workflow calling all outputs reviews, without an extra model call. Creating alternatives or arbitrating architecture is architecture; gathering evidence is research; critiquing an existing proposal is review. "
     + workCategories.map(({ id, task }) => `${id}: ${task}`).join("; ")
     + ". Omit only for an old assignment whose task is unknown."
   ),
@@ -59,7 +72,7 @@ function planProgress(plan) {
 
 function isMainAgentForegroundStep(step) {
   return step.status === "in_progress"
-    && step.agents.length === 0
+    && !step.agents.some(agent => agent.status !== "completed")
     && !step.parallelActivity
     && step.childPlanIds.length === 0;
 }
@@ -156,9 +169,6 @@ function touch(plan) {
   if (allFinished && plan.status === "active") {
     plan.status = "completed";
     plan.completedAt = plan.updatedAt;
-  } else if (!allFinished && plan.status === "completed") {
-    plan.status = "active";
-    plan.completedAt = null;
   }
 }
 
@@ -178,7 +188,7 @@ function syncLinkedStep(parent, step, visited = new Set()) {
   if (allCompleted) {
     step.status = "completed";
     step.progress = 100;
-    step.agents = [];
+    step.agents = step.agents.map(agent => ({ ...agent, status: "completed" }));
   } else if (allTerminal) {
     step.status = "blocked";
     step.agents = [];
@@ -206,7 +216,7 @@ function propagatePlanProgress(plan) {
 const server = new McpServer(
   { name: "codex-task-plan", version: "0.1.0" },
   {
-    instructions:
+    instructions: "Only the main agent manages this plugin. Delegated subagents must not call any task-plan tools; they report results to the main agent. Keep completed agent icons with status=completed; only working agents count as parallel work. " +
       "Create one plan only for substantial decomposed work. Build ordinary main-agent steps as a real sequential execution path. Keep its returned plan_id with the task context and accept a known plan_id from another conversation when explicitly requested. Revise the existing plan when scope changes instead of replacing it. Only one ordinary main-agent step may be in progress; additional concurrent steps require assigned agents, linked subplans, or a concise parallel_activity describing real background work. Attach the names of currently working subagents to their steps. Render once after creation. Before each later user-visible progress response, record its visual weight as 1, 2, or 3 points. Render another copy only when that tool returns should_show=true; this requires both 4 accumulated points and plan progress changed since the previous render.",
   },
 );
@@ -296,7 +306,7 @@ registerAppTool(
   {
     title: "Revise task plan",
     description:
-      "Revise an existing plan when scope changes without losing state on retained steps. Optionally rename the plan or steps, append new pending steps, remove only pending or skipped leaf steps, and provide the complete remaining step order. A completed plan reopens when new unfinished work is added. Linked parent progress is recalculated automatically.",
+      "Revise an active plan when scope changes without losing state on retained steps. Optionally rename the plan or steps, append new pending steps, remove only pending or skipped leaf steps, and provide the complete remaining step order. Completed plans are read-only: create a new plan for new work. Linked parent progress is recalculated automatically.",
     inputSchema: {
       plan_id: z.string().uuid(),
       title: z.string().min(1).max(120).optional(),
@@ -446,7 +456,7 @@ registerAppTool(
   {
     title: "Update task plan step",
     description:
-      "Update one step in the current conversation's plan. Only one ordinary main-agent step may be in progress. Additional concurrent steps require assigned agents, linked subplans, or parallel_activity describing a real background operation. Use progress only for in-progress work and agents for subagents currently working on this step. A step with linked subplans derives status and progress from them; manual status or progress is ignored while notes and agents remain editable. Completing the final unfinished step completes the plan automatically.",
+      "Update one step in the current conversation's plan. Use waiting_for_user only when progress requires a direct user answer, and put the concise question in note. Only one ordinary main-agent step may be in progress. Additional concurrent steps require assigned agents, linked subplans, or parallel_activity describing a real background operation. Use progress only for in-progress work and agents for subagents currently working on this step. A step with linked subplans derives status and progress from them; manual status or progress is ignored while notes and agents remain editable. Completing the final unfinished step completes the plan automatically.",
     inputSchema: {
       plan_id: z.string().uuid(),
       step_id: z.string().min(1),
@@ -495,7 +505,9 @@ registerAppTool(
     const proposedStep = {
       ...step,
       status,
-      agents: status === "in_progress" ? (agents ?? step.agents) : [],
+      agents: status === "in_progress" ? (agents ?? step.agents)
+        : ["completed", "skipped"].includes(status)
+          ? (agents ?? step.agents).map(agent => ({ ...agent, status: "completed" })) : [],
       parallelActivity: status === "in_progress"
         ? (parallelActivity ?? step.parallelActivity)
         : "",
@@ -568,7 +580,7 @@ registerAppTool(
       destructiveHint: false,
       idempotentHint: true,
     },
-    _meta: {
+    _meta: companionMode ? {} : {
       ui: { resourceUri: widgetUri, visibility: ["model", "app"] },
       "openai/outputTemplate": widgetUri,
       "openai/widgetAccessible": true,
@@ -580,7 +592,7 @@ registerAppTool(
     const plan = requirePlan(planId);
     plan.lastShownRevision = plan.revision;
     plan.reanchorScore = 0;
-    return resultFor(plan, `Rendered task plan ${plan.id}.`, {
+    return resultFor(plan, companionMode ? `Queued task plan ${plan.id} for the companion. Delivery is asynchronous; selection is unchanged.` : `Rendered task plan ${plan.id}.`, {
       view,
       reanchor_score: plan.reanchorScore,
       shown_revision: plan.lastShownRevision,
@@ -634,4 +646,8 @@ registerAppResource(
   }),
 );
 
+if (process.env.TASK_PLAN_NATIVE_EVENT_PROBE === '1') {
+  const { registerNativeEventProbe } = await import('./native-event-probe.mjs');
+  await registerNativeEventProbe(server);
+}
 await server.connect(new StdioServerTransport());

@@ -13,6 +13,7 @@
         --running: #4f8cff;
         --done: #31a56b;
         --blocked: #e0565b;
+        --question: #d98d2b;
         --skipped: #b07a35;
         font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
@@ -50,6 +51,7 @@
       .status-gear { display: block; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; transform-origin: center; animation: gear-turn 7s linear infinite; }
       .goal-stopped .status-gear { animation-play-state: paused; }
       .completed .status { color: var(--done); }
+      .waiting_for_user .status { color: var(--question); animation: question-breathe 2.8s ease-in-out infinite; transform-origin: center; }
       .blocked .status { color: var(--blocked); }
       .skipped .status { color: var(--skipped); }
       .step-title { font-size: 12px; line-height: 18px; }
@@ -69,7 +71,7 @@
       .agent img { display: block; flex: none; width: 24px; height: 24px; object-fit: contain; }
       .agent svg { width: 24px; height: 24px; }
       .in_progress .agent > img {
-        animation: var(--agent-motion, none) var(--agent-period, 4s) ease-in-out infinite,
+        animation: var(--agent-motion, none) var(--agent-period, 2.6s) ease-in-out infinite,
           agent-breathe 2.5s ease-in-out infinite;
         animation-delay: var(--agent-phase, 0s); transform-origin: 50% 65%;
       }
@@ -85,16 +87,17 @@
       .agent[data-category="operations"] { --agent-motion: agent-operations; }
       .in_progress .agent:hover > img, .in_progress .agent:focus-visible > img,
       .goal-stopped .in_progress .agent > img { animation-play-state: paused; }
-      @keyframes agent-research { 0%, 22%, 100% { transform: rotate(0); } 5%, 15% { transform: rotate(-3deg); } 10%, 19% { transform: rotate(3deg); } }
-      @keyframes agent-architecture { 0%, 24%, 100% { transform: rotate(0); } 8% { transform: rotate(-2deg); } 16% { transform: rotate(2deg); } }
-      @keyframes agent-design { 0%, 30%, 100% { transform: rotate(0); } 15% { transform: rotate(-4deg); } }
-      @keyframes agent-implementation { 0%, 10%, 20%, 100% { transform: translateY(0); } 5%, 15% { transform: translateY(-1px); } }
-      @keyframes agent-diagnostics { 0%, 24%, 100% { transform: translateX(0); } 8% { transform: translateX(1px); } 16% { transform: translateX(-1px); } }
-      @keyframes agent-testing { 0%, 18%, 100% { transform: rotate(0); } 8% { transform: rotate(4deg); } }
-      @keyframes agent-review { 0%, 40%, 100% { transform: rotate(0); } 12% { transform: rotate(-3deg); } 28% { transform: rotate(3deg); } }
-      @keyframes agent-documentation { 0%, 20%, 100% { transform: translateX(0) rotate(0); } 8% { transform: translateX(1px) rotate(5deg); } }
-      @keyframes agent-data { 0%, 24%, 100% { transform: translateY(0); } 6% { transform: translateY(1px); } 12% { transform: translateY(-.5px); } 18% { transform: translateY(.5px); } }
-      @keyframes agent-operations { 0%, 18%, 100% { transform: translateX(0) rotate(0); } 4% { transform: translateX(-1px) rotate(-2deg); } 8% { transform: translateX(1px) rotate(2deg); } 12% { transform: translateX(-.5px); } }
+      .in_progress .agent[data-status="completed"] > img { animation: none; opacity: 1; transform: none; }
+      @keyframes agent-research { 0%, 33.846%, 100% { transform: rotate(0); } 7.692%, 23.077% { transform: rotate(-3deg); } 15.385%, 29.231% { transform: rotate(3deg); } }
+      @keyframes agent-architecture { 0%, 36.923%, 100% { transform: rotate(0); } 12.308% { transform: rotate(-2deg); } 24.615% { transform: rotate(2deg); } }
+      @keyframes agent-design { 0%, 46.154%, 100% { transform: rotate(0); } 23.077% { transform: rotate(-4deg); } }
+      @keyframes agent-implementation { 0%, 15.385%, 30.769%, 100% { transform: translateY(0); } 7.692%, 23.077% { transform: translateY(-1px); } }
+      @keyframes agent-diagnostics { 0%, 36.923%, 100% { transform: translateX(0); } 12.308% { transform: translateX(1px); } 24.615% { transform: translateX(-1px); } }
+      @keyframes agent-testing { 0%, 27.692%, 100% { transform: rotate(0); } 12.308% { transform: rotate(4deg); } }
+      @keyframes agent-review { 0%, 61.538%, 100% { transform: rotate(0); } 18.462% { transform: rotate(-3deg); } 43.077% { transform: rotate(3deg); } }
+      @keyframes agent-documentation { 0%, 30.769%, 100% { transform: translateX(0) rotate(0); } 12.308% { transform: translateX(1px) rotate(5deg); } }
+      @keyframes agent-data { 0%, 36.923%, 100% { transform: translateY(0); } 9.231% { transform: translateY(1px); } 18.462% { transform: translateY(-.5px); } 27.692% { transform: translateY(.5px); } }
+      @keyframes agent-operations { 0%, 27.692%, 100% { transform: translateX(0) rotate(0); } 6.154% { transform: translateX(-1px) rotate(-2deg); } 12.308% { transform: translateX(1px) rotate(2deg); } 18.462% { transform: translateX(-.5px); } }
       .plan-icon img { display: block; width: 18px; height: 18px; object-fit: contain; }
       .agent-gear { transform-origin: 16px 16px; }
       .goal-stopped .agent-gear { animation-play-state: paused; }
@@ -132,6 +135,7 @@
       .goal-stopped .progress > span { transition: none; animation-play-state: paused; }
       @keyframes appear { from { opacity: 0; transform: translateY(3px); } }
       @keyframes pulse { 50% { opacity: .42; transform: scale(.82); } }
+      @keyframes question-breathe { 0%, 100% { opacity: .82; transform: translateY(0) scale(1); } 50% { opacity: 1; transform: translateY(-.7px) scale(1.035); } }
       @keyframes agent-breathe { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
       @keyframes progress-glint { 55%, 100% { transform: translateX(360%); } }
       @media (prefers-reduced-motion: reduce) {
@@ -156,6 +160,7 @@
       const labels = {
         pending: { icon: "○", text: "Ожидает" },
         in_progress: { icon: "◉", text: "В работе" },
+        waiting_for_user: { icon: "?", text: "Нужен ответ" },
         completed: { icon: "✓", text: "Готово" },
         blocked: { icon: "!", text: "Заблокировано" },
         skipped: { icon: "–", text: "Пропущено" },
@@ -253,13 +258,14 @@
             for (const itemAgent of item.agents) {
               const agent = document.createElement("span");
               agent.className = "agent";
+              agent.dataset.status = itemAgent.status ?? "working";
               const categoryIcon = Object.hasOwn(categoryIcons, itemAgent.category) ? categoryIcons[itemAgent.category] : null;
               const displayName = itemAgent.name.replace(/^\/root\//, "");
               const agentLabel = `${categoryIcon?.label ?? "Субагент"} · ${displayName}`;
               agent.dataset.tooltip = agentLabel;
               // Stable identity offsets keep agents out of sync across renders.
               const motionSeed = Array.from(itemAgent.name).reduce((hash, char) => (hash * 31 + char.codePointAt(0)) >>> 0, 0);
-              agent.style.setProperty("--agent-period", `${(5 + (motionSeed % 3001) / 1000) / 1.5}s`);
+              agent.style.setProperty("--agent-period", `${((5 + (motionSeed % 3001) / 1000) / 1.5) * 0.65}s`);
               agent.style.setProperty("--agent-phase", `-${(motionSeed % 5000) / 1000}s`);
               agent.tabIndex = 0;
               agent.setAttribute("aria-label", `Субагент: ${agentLabel}`);
