@@ -1,0 +1,16 @@
+{
+  "name": "task-plan",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:goal": "node scripts/goal-smoke.mjs",
+    "smoke:icons": "node scripts/icons-smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "1.7.5",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "4.5.4"
+  }
+}

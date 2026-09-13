@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ru"><meta charset="utf-8">
+<style>body{font:14px system-ui;color:#bfc4ce;background:transparent;margin:0;padding:16px}h3{margin:0 0 12px}pre{white-space:pre-wrap;font:12px ui-monospace}button{padding:6px 12px}</style>
+<h3>Нативная доставка событий</h3><div id="status">Подключение к Codex…</div><pre id="log"></pre>
+<script>
+const uri = __STATE_URI__;
+const pending = new Map(); let seq = 0, events = 0, subscribed = false, finished = false;
+const log = text => document.getElementById('log').textContent += text + '\n';
+const send = message => window.parent.postMessage({jsonrpc:'2.0', ...message}, '*');
+function request(method, params) {
+  return new Promise((resolve,reject) => {
+    const id = ++seq;
+    const timeout = setTimeout(() => {pending.delete(id);reject(new Error(method + ': timeout'));}, 8000);
+    pending.set(id, {resolve, reject, timeout}); send({id, method, params});
+  });
+}
+async function control(action, more={}) {
+  const result = await request('tools/call', {name:'native_event_probe_control', arguments:{action,...more}});
+  if (result.isError) throw new Error(JSON.stringify(result.content));
+  return result;
+}
+async function fail(error) {
+  if (finished) return; finished = true;
+  document.getElementById('status').textContent = 'Не доставлено: ' + error.message;
+  log(String(error));
+  if (subscribed) await request('resources/unsubscribe', {uri}).catch(()=>{});
+  await control('error', {message:String(error).slice(0,1000)}).catch(()=>{});
+}
+window.addEventListener('message', async event => {
+  if (event.source !== window.parent || event.data?.jsonrpc !== '2.0') return;
+  const m=event.data;
+  if (m.id != null && pending.has(m.id)) {
+    const p=pending.get(m.id);pending.delete(m.id);clearTimeout(p.timeout);
+    m.error ? p.reject(new Error(m.error.message)) : p.resolve(m.result); return;
+  }
+  if (m.method === 'notifications/resources/updated' && m.params?.uri === uri && !finished) {
+    events++;log('Получено resources/updated');
+    try {
+      const r=await request('resources/read',{uri});
+      const state=JSON.parse(r.contents[0].text);
+      if (state.value !== 1) return;
+      await control('receipt',{value:state.value,run:state.run,events});
+      await request('resources/unsubscribe',{uri});subscribed=false;finished=true;
+      document.getElementById('status').textContent='PASS: файл 0 → 1, событие доставлено без polling';
+      log('Подписка снята. Тест завершён.');
+    } catch(e){await fail(e);}
+  }
+  if (m.method === 'ui/resource-teardown' && m.id != null) send({id:m.id,result:{}});
+});
+(async()=>{
+  try {
+    const init=await request('ui/initialize',{protocolVersion:'2026-01-26',appInfo:{name:'native-event-probe',version:'1.0'},appCapabilities:{}});
+    log('Инициализация: ' + JSON.stringify(init.hostCapabilities));
+    send({method:'ui/notifications/initialized'});
+    send({method:'ui/notifications/size-changed',params:{height:230}});
+    await request('resources/subscribe',{uri});subscribed=true;log('Подписка оформлена');
+    await control('arm');document.getElementById('status').textContent='Ждём одно файловое событие…';
+    setTimeout(()=>{if(!finished)fail(new Error('Событие не пришло за 10 секунд'));},10000);
+  }catch(e){await fail(e);}
+})();
+</script></html>

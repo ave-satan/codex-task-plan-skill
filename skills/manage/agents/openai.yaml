@@ -1,0 +1,3 @@
+interface:
+  display_name: "Manage"
+  short_description: "Компактный план задачи с прогрессом этапов"
