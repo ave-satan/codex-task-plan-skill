@@ -707,7 +707,7 @@ struct PanelView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let plan = store.active {
-                HStack(alignment: .top, spacing: PanelMetrics.columnGap) {
+                HStack(alignment: .center, spacing: PanelMetrics.columnGap) {
                     PlanIconSwitcher(store: store)
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Text(plan.title)
@@ -1338,6 +1338,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "mascotVisible": false,
                                      "headerBrandVisible": false,
                                      "headerContents": "emoji-title-counter",
+                                     "planIconMultilineAlignment": "title-block-center",
                                      "counterAlignment": "title-baseline",
                                      "counterStyle": "rounded-outline",
                                      "palette": "codex-panel",

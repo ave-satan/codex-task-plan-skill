@@ -48,6 +48,7 @@ try {
   assert.equal(state.window.agentStackTrigger, 'title-plus-icons-overflow-always-compacts');
   assert.equal(state.window.agentStackStrideScale, 0.42);
   assert.equal(state.window.agentBlurStrength, 'regular-material-plus-surface-fade');
+  assert.equal(state.window.planIconMultilineAlignment, 'title-block-center');
   assert.equal(state.window.counterAlignment, 'title-baseline');
   await sendCompanion(socket, { action: 'snapshot', name: 'narrow-layout' });
   console.log(JSON.stringify({ passed: true, fixture, snapshot: join(fixture, 'narrow-layout.png') }));

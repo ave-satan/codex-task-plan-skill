@@ -82,6 +82,7 @@ try {
   assert.equal(initialWindow.mascotVisible,false);
   assert.equal(initialWindow.headerBrandVisible,false);
   assert.equal(initialWindow.headerContents,'emoji-title-counter');
+  assert.equal(initialWindow.planIconMultilineAlignment,'title-block-center');
   assert.equal(initialWindow.counterAlignment,'title-baseline');
   assert.equal(initialWindow.counterStyle,'rounded-outline');
   assert.equal(initialWindow.palette,'codex-panel');
