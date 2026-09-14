@@ -715,7 +715,6 @@ struct PlanCompletionLifecycle: View {
         }
         .frame(width: diameter, height: diameter)
         .id(animationKey)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovered)
     }
 
     private func elapsed(at now: Date) -> TimeInterval {
@@ -807,7 +806,9 @@ struct TransitionPlanView: View {
 
                 if let active = store.active {
                     ZStack {
-                        PlanEmojiCircle(store: store, plan: active, size: 38, highlighted: false, glyphSize: 27)
+                        PlanEmojiCircle(store: store, plan: active, size: 38,
+                                        highlighted: store.collapsedHovered || store.hoveredPlanID == active.id,
+                                        glyphSize: 27)
                             .scaleEffect(0.67 + 0.33 * compact)
                             .overlay(alignment: .bottomTrailing) {
                                 if store.plans.count > 1 {
@@ -1640,6 +1641,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self, self.presentationAnimationToken == token,
                   !self.store.collapsed, !self.collapsingToIcon else { return }
             self.store.transitionIconOnly = false
+            self.store.collapsedHovered = false
             self.panel.minSize = self.collapsedSize
             self.panel.setFrame(target, display: true)
             self.hostView.resizeEnabled = resizeEnabled
@@ -1715,6 +1717,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let source = panel.frame
         let target = fittedExpandedFrame(near: source)
         collapsedFrame = source
+        store.hoveredPlanID = store.selected
         store.transitionToCollapsed = false
         store.transitionIconOnly = true
         schedulePresentationFrame(target, alpha: 1, animated: true) { [weak self] in
@@ -1722,7 +1725,6 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         store.collapsed = false
         collapsingToIcon = false
-        store.collapsedHovered = false
         collapsedHoverStartedAt = nil
         expandedFromIconSource = source
         expandedMovedBeyondSource = false
