@@ -873,9 +873,9 @@ struct PlanIconSwitcher: View {
                         .fill(CodexPalette.raised.opacity(0.96))
                         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
                             .stroke(CodexPalette.border, lineWidth: 0.7))
-                        .frame(width: PanelMetrics.iconColumn + 8 + (store.planSwitcherExpanded ? CGFloat(otherPlans.count) * 28 : 0),
-                               height: 28)
-                        .offset(x: -4)
+                        .frame(width: PanelMetrics.iconColumn + 12 + (store.planSwitcherExpanded ? CGFloat(otherPlans.count) * 28 : 0),
+                               height: 34)
+                        .offset(x: -6)
                         .transition(.scale(scale: 0.72, anchor: .leading).combined(with: .opacity))
                         .animation(.spring(response: 0.26, dampingFraction: 0.86), value: store.planSwitcherExpanded)
                         .zIndex(0)
