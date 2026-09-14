@@ -87,6 +87,7 @@ try {
   assert.equal(initialWindow.counterStyle,'rounded-outline');
   assert.equal(initialWindow.palette,'codex-panel');
   assert.equal(initialWindow.surfaceRGB,'#222224');
+  assert.equal(initialWindow.stepsSurfaceRGB,'#1F1F21');
   assert.equal(initialWindow.borderRGB,'#303032');
   assert.equal(initialWindow.windowBorderStyle,'custom-rounded-1pt');
   assert.equal(initialWindow.windowShadowVisible,false);
@@ -114,6 +115,12 @@ try {
   assert.equal(initialWindow.headerDividerVisible,true);
   assert.equal(initialWindow.headerDividerHeight,0.5);
   assert.equal(initialWindow.headerDividerRGB,'#303032');
+  assert.equal(initialWindow.collapsedBorder,'1pt-white-17pct');
+  assert.equal(initialWindow.collapsedExpandDelay,0.7);
+  assert.equal(initialWindow.collapsedDragSuppressesExpansion,true);
+  assert.equal(initialWindow.hoverExpandedFrameContainsSourceIcon,true);
+  assert.equal(initialWindow.collapseVisualSwap,'after-frame-animation-completes');
+  assert.equal(initialWindow.hostLifecycle,'workspace-termination-observer-with-750ms-running-app-fallback');
   assert.equal(initialWindow.agentIconStyle,'illustrated-assets');
   assert.equal(initialWindow.agentPulseStyle,'subtle-opacity-contrast');
   assert.equal(initialWindow.agentIconVerticalOffset,-2);

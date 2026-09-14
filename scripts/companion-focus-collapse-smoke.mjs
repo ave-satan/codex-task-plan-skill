@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -11,8 +11,11 @@ import { sendCompanion } from '../companion-bridge.mjs';
 
 const binary = process.env.COMPANION_BINARY;
 assert.ok(binary, 'Set COMPANION_BINARY to the built native companion');
-const hostBundle = process.env.FOCUS_HOST_BUNDLE ?? 'com.apple.finder';
-const awayBundle = process.env.FOCUS_AWAY_BUNDLE ?? 'com.openai.codex';
+const useFixtureApps = process.env.FOCUS_USE_FIXTURE_APPS === '1';
+const hostBundle = process.env.FOCUS_HOST_BUNDLE
+  ?? (useFixtureApps ? 'local.taskplan.focus-host' : 'com.apple.finder');
+const awayBundle = process.env.FOCUS_AWAY_BUNDLE
+  ?? (useFixtureApps ? 'local.taskplan.focus-away' : 'com.openai.codex');
 const fixture = await mkdtemp('/tmp/taskplan-focus-collapse-');
 const socket = join(fixture, 'control.sock');
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -35,7 +38,51 @@ async function runSwift(source) {
   assert.equal(code, 0, stderr);
 }
 
+async function run(command, args) {
+  const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  const [code] = await once(child, 'exit');
+  assert.equal(code, 0, stderr);
+}
+
+async function buildFocusApp(name, bundle) {
+  const appRoot = join(fixture, `${name}.app`);
+  const macOS = join(appRoot, 'Contents', 'MacOS');
+  const executable = join(macOS, name);
+  await mkdir(macOS, { recursive: true });
+  await writeFile(join(appRoot, 'Contents', 'Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>${name}</string>
+<key>CFBundleIdentifier</key><string>${bundle}</string>
+<key>CFBundleName</key><string>${name}</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>`);
+  const source = join(fixture, `${name}.swift`);
+  await writeFile(source, `import AppKit
+let app = NSApplication.shared
+app.setActivationPolicy(.regular)
+let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 180, height: 120),
+  styleMask: [.titled], backing: .buffered, defer: false)
+window.title = "${name}"
+window.makeKeyAndOrderFront(nil)
+app.run()
+`);
+  await run('/usr/bin/swiftc', [
+    '-swift-version', '5', '-module-cache-path', join(fixture, 'module-cache'),
+    source, '-o', executable, '-framework', 'AppKit',
+  ]);
+  await run('/usr/bin/codesign', ['--force', '--sign', '-', appRoot]);
+  return spawn('/usr/bin/open', ['-W', '-n', appRoot], { stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
 async function activate(bundle, settleMicroseconds = 650000) {
+  if (useFixtureApps && [hostBundle, awayBundle].includes(bundle)) {
+    await run('/usr/bin/osascript', ['-e', `tell application id "${bundle}" to activate`]);
+    await delay(settleMicroseconds / 1000);
+    return;
+  }
   await runSwift(`
 import AppKit
 import Darwin
@@ -45,6 +92,14 @@ usleep(${settleMicroseconds})
 }
 
 async function rapidFocusSequence() {
+  if (useFixtureApps) {
+    for (const bundle of [awayBundle, hostBundle, awayBundle, hostBundle]) {
+      await run('/usr/bin/osascript', ['-e', `tell application id "${bundle}" to activate`]);
+      await delay(70);
+    }
+    await delay(650);
+    return;
+  }
   await runSwift(`
 import AppKit
 import Darwin
@@ -104,6 +159,11 @@ usleep(180000)
 `);
 }
 
+const focusApps = useFixtureApps
+  ? [await buildFocusApp('FocusHost', hostBundle), await buildFocusApp('FocusAway', awayBundle)]
+  : [];
+if (useFixtureApps) await delay(800);
+
 const app = spawn(binary, [], { env: { ...process.env,
   PLAN_COMPANION_DATA: fixture,
   PLAN_COMPANION_SOCKET: socket,
@@ -126,13 +186,19 @@ try {
   const configured = await client.callTool({ name: 'set_companion_focus_mode', arguments: { enabled: true } });
   assert.equal(configured.structuredContent?.enabled, true);
   assert.equal(configured.structuredContent?.state?.window?.focusCollapseEnabled, true);
+  await sendCompanion(socket, { action: 'set_frame', x: 620, y: 260, width: 360, height: 360 });
   for (const [id, title] of [['plan-1', 'Первый план'], ['plan-2', 'Второй план']]) {
     await sendCompanion(socket, { action: 'upsert', plan: {
       id, title, revision: 1, status: 'active',
       steps: [{ id: 'step-1', title: 'Проверить состояние', status: 'in_progress', progress: 35 }],
     }});
   }
-  await sendCompanion(socket, { action: 'set_frame', x: 620, y: 260, width: 360, height: 360 });
+
+  const initiallyCollapsed = await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.window.presentation === 'collapsed' && !state.window.presentationTransitioning && state;
+  }, 'initial collapsed fixture');
+  assert.equal(initiallyCollapsed.expandedWindowFrame.width, 360);
 
   await activate(hostBundle);
   const expanded = await eventually(async () => {
@@ -155,9 +221,11 @@ try {
 
   await activate(awayBundle, 60000);
   const collapsing = (await sendCompanion(socket, { action: 'status' })).state;
-  assert.equal(collapsing.window.presentation, 'collapsed');
+  assert.equal(collapsing.window.presentation, 'collapsing');
   assert.equal(collapsing.window.presentationTransitioning, true);
   assert.ok(collapsing.window.width > 52, 'focus loss must visibly animate instead of snapping');
+  assert.equal(collapsing.window.collapseAnimation,
+    'expanded-plan-icon-converges-and-translates-to-collapsed-position');
   const collapsed = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
     return state.visible && state.window.presentation === 'collapsed'
@@ -174,6 +242,11 @@ try {
     return Math.abs(state.window.x - collapsed.window.x) > 40 && state;
   }, 'draggable collapsed icon');
   assert.notEqual(dragged.collapsedWindowFrame.x, collapsed.window.x);
+  await delay(900);
+  const heldAfterDrag = (await sendCompanion(socket, { action: 'status' })).state;
+  assert.equal(heldAfterDrag.window.presentation, 'collapsed',
+    'dragging and releasing over the icon must not trigger hover expansion');
+  assert.equal(heldAfterDrag.window.collapsedDragSuppressesExpansion, true);
   await movePointer({ x: 100, y: 100 });
 
   await activate(hostBundle);
@@ -187,7 +260,8 @@ try {
   await rapidFocusSequence();
   const rapidStable = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
-    return state.frontmostBundle === hostBundle && state.window.presentation === 'expanded'
+    return [hostBundle, 'local.taskplan.companion.prototype'].includes(state.frontmostBundle)
+      && state.window.presentation === 'expanded'
       && !state.window.presentationTransitioning && Math.abs(state.window.width - 360) < 0.5 && state;
   }, 'stable rapid focus transitions');
   assert.equal(rapidStable.expandedWindowFrame.width, 360, 'interrupted animations must not corrupt the saved expanded frame');
@@ -223,6 +297,19 @@ try {
   assert.ok(hoverExpanded.retentionArmedPlanIDs.includes('plan-1'));
   assert.equal(hoverExpanded.activeStatus, 'completed');
   assert.equal(hoverExpanded.window.resizable, false, 'hover-expanded unfocused window must not resize');
+  const hoverSourceCenter = {
+    x: collapsedAgain.window.x + collapsedAgain.window.width / 2,
+    y: collapsedAgain.window.y + collapsedAgain.window.height / 2,
+  };
+  assert.ok(hoverSourceCenter.x >= hoverExpanded.window.x
+      && hoverSourceCenter.x <= hoverExpanded.window.x + hoverExpanded.window.width
+      && hoverSourceCenter.y >= hoverExpanded.window.y
+      && hoverSourceCenter.y <= hoverExpanded.window.y + hoverExpanded.window.height,
+    'hover-expanded window must contain the source icon position');
+  assert.equal(hoverExpanded.window.hoverExpandedFrameContainsSourceIcon, true);
+  assert.equal(hoverExpanded.window.collapsedExpandDelay, 0.7);
+  assert.equal(hoverExpanded.window.collapsedBorder, '1pt-white-17pct');
+  assert.equal(hoverExpanded.window.stepsSurfaceRGB, '#1F1F21');
   assert.equal((await sendCompanion(socket, { action: 'cursor_probe', x: 1, y: 1 })).kind, 'arrow');
 
   await sendCompanion(socket, { action: 'remove', id: 'plan-1' });
@@ -238,5 +325,14 @@ try {
   try { await activate(awayBundle); } catch {}
   if (app.exitCode === null) {
     try { await sendCompanion(socket, { action: 'quit' }); } catch { app.kill('SIGKILL'); }
+  }
+  if (useFixtureApps) {
+    for (const bundle of [hostBundle, awayBundle]) {
+      try { await run('/usr/bin/osascript', ['-e', `tell application id "${bundle}" to quit`]); } catch {}
+    }
+    await Promise.all(focusApps.map(child => child.exitCode === null
+      ? Promise.race([once(child, 'exit'), delay(3000).then(() => child.kill('SIGKILL'))])
+      : undefined));
+    await rm(fixture, { recursive: true, force: true });
   }
 }

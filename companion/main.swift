@@ -57,6 +57,7 @@ private func planEmoji(_ plan: Plan) -> String {
 
 private enum CodexPalette {
     static let surface = Color(red: 34 / 255, green: 34 / 255, blue: 36 / 255)
+    static let stepsSurface = Color(red: 31 / 255, green: 31 / 255, blue: 33 / 255)
     static let raised = Color(red: 55 / 255, green: 55 / 255, blue: 58 / 255)
     static let primary = Color(red: 216 / 255, green: 217 / 255, blue: 220 / 255)
     static let stepPrimary = Color(red: 184 / 255, green: 184 / 255, blue: 186 / 255)
@@ -688,7 +689,7 @@ struct CollapsedPlanView: View {
         ZStack {
             Circle()
                 .fill(CodexPalette.raised.opacity(store.collapsedHovered ? 0.92 : 0.68))
-                .overlay(Circle().stroke(CodexPalette.border.opacity(0.9), lineWidth: 0.8))
+                .overlay(Circle().stroke(Color.white.opacity(store.collapsedHovered ? 0.24 : 0.17), lineWidth: 1))
                 .scaleEffect(store.collapsedHovered ? 1.12 : 1)
                 .animation(.spring(response: 0.2, dampingFraction: 0.72), value: store.collapsedHovered)
             if let active = store.active {
@@ -837,6 +838,7 @@ struct PanelView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .frame(maxHeight: .infinity)
+                    .background(CodexPalette.stepsSurface)
                     .onAppear {
                         guard let active = plan.steps.first(where: { $0.status == "in_progress" }) else { return }
                         DispatchQueue.main.async { proxy.scrollTo(active.id, anchor: .center) }
@@ -1119,10 +1121,15 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var expandedFromIconSource: NSRect?
     var expandedMovedBeyondSource = false
     var applyingPresentationFrame = false
+    var collapsingToIcon = false
+    var collapsedDragInProgress = false
+    var collapsedHoverBlockedUntilExit = false
+    var hostPresenceObserved = false
+    var hostMissingStartedAt: Date?
     var presentationAnimationToken = 0
     let retentionSeconds = max(0.1, Double(ProcessInfo.processInfo.environment["PLAN_COMPANION_RETENTION_SECONDS"] ?? "") ?? 30)
     let collapsedSize = NSSize(width: 52, height: 52)
-    let collapsedExpandDelay: TimeInterval = 0.32
+    let collapsedExpandDelay: TimeInterval = 0.70
 
     func terminalDate(_ plan: Plan) -> Date? {
         guard ["completed", "cancelled"].contains(plan.status ?? "") else { return nil }
@@ -1225,6 +1232,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.contentView = hostView
         panel.enableCursorRects()
         cursorTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+            self?.syncHostLifecycle()
             self?.syncLiveResizeCursor()
             self?.syncPlanSwitcherHover()
             self?.syncCollapsedHover()
@@ -1239,7 +1247,17 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 return nil
             }
             if self.panel.frame.contains(pointer), self.canBeginWindowDrag(at: pointer) {
+                let wasCollapsed = self.store.collapsed
+                if wasCollapsed {
+                    self.collapsedDragInProgress = true
+                    self.store.collapsedHovered = false
+                    self.collapsedHoverStartedAt = nil
+                }
                 self.panel.performDrag(with: event)
+                if wasCollapsed {
+                    self.collapsedDragInProgress = false
+                    self.collapsedHoverBlockedUntilExit = true
+                }
                 return nil
             }
             let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
@@ -1260,6 +1278,15 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                              object: nil, queue: .main) { [weak self] _ in
             self?.syncPresentation()
         })
+        observers.append(center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification,
+                                             object: nil, queue: .main) { [weak self] note in
+            guard let self,
+                  let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.bundleIdentifier == self.hostBundle else { return }
+            self.journal("host_terminated")
+            NSApp.terminate(nil)
+        })
+        syncHostLifecycle()
         if let frame = validRestoredExpandedFrame() {
             expandedFrame = frame
             panel.setFrame(frame, display: false)
@@ -1364,12 +1391,20 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func fittedExpandedFrame(near iconFrame: NSRect? = nil) -> NSRect {
-        let candidate = expandedFrame ?? panel.frame
-        let screen = screenFor(iconFrame ?? candidate) ?? NSScreen.main
+        var candidate = expandedFrame ?? panel.frame
+        guard let iconFrame else {
+            let screen = screenFor(candidate) ?? NSScreen.main
+            return screen.map { clamped(candidate, to: $0.visibleFrame) } ?? candidate
+        }
+        let iconCenter = NSPoint(x: iconFrame.midX, y: iconFrame.midY)
+        candidate.origin.x = iconCenter.x - PanelMetrics.inset - PanelMetrics.iconColumn / 2
+        candidate.origin.y = iconCenter.y - candidate.height + PanelMetrics.inset + PanelMetrics.iconColumn / 2
+        let screen = screenFor(iconFrame) ?? NSScreen.main
         return screen.map { clamped(candidate, to: $0.visibleFrame) } ?? candidate
     }
 
-    func applyPresentationFrame(_ frame: NSRect, alpha: CGFloat, animated: Bool) {
+    func applyPresentationFrame(_ frame: NSRect, alpha: CGFloat, animated: Bool,
+                                completion: (() -> Void)? = nil) {
         presentationAnimationToken += 1
         let token = presentationAnimationToken
         applyingPresentationFrame = true
@@ -1381,7 +1416,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 panel.animator().alphaValue = alpha
             } completionHandler: { [weak self] in
                 guard let self, self.presentationAnimationToken == token else { return }
+                self.panel.setFrame(frame, display: true)
+                self.panel.alphaValue = alpha
                 self.applyingPresentationFrame = false
+                completion?()
             }
         } else {
             panel.setFrame(frame, display: true)
@@ -1389,13 +1427,37 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.presentationAnimationToken == token else { return }
                 self.applyingPresentationFrame = false
+                completion?()
             }
         }
     }
 
+    func schedulePresentationFrame(_ frame: NSRect, alpha: CGFloat, animated: Bool) {
+        presentationAnimationToken += 1
+        let reservation = presentationAnimationToken
+        applyingPresentationFrame = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.presentationAnimationToken == reservation else { return }
+            self.applyPresentationFrame(frame, alpha: alpha, animated: animated)
+        }
+    }
+
+    func finishCollapse(to target: NSRect) {
+        guard collapsingToIcon else { return }
+        collapsingToIcon = false
+        store.collapsed = true
+        hostView.resizeEnabled = false
+        hostView.windowDragEnabled = true
+        panel.minSize = collapsedSize
+        panel.setFrame(target, display: true)
+        panel.alphaValue = 0.82
+        try? persist()
+        journal("collapsed")
+    }
+
     func collapseToIcon(animated: Bool = false) {
         guard store.active != nil else { panel.orderOut(nil); return }
-        guard !store.collapsed else { panel.orderFrontRegardless(); return }
+        guard !store.collapsed, !collapsingToIcon else { panel.orderFrontRegardless(); return }
         if !applyingPresentationFrame { expandedFrame = panel.frame }
         let target = collapsedFrame ?? defaultCollapsedFrame()
         collapsedFrame = target
@@ -1405,19 +1467,19 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.planSwitcherExpanded = false
         store.hoveredPlanID = nil
         planTooltip.hide(animated: true)
-        store.collapsed = true
+        collapsingToIcon = true
         hostView.resizeEnabled = false
         hostView.windowDragEnabled = true
         panel.minSize = collapsedSize
         panel.orderFrontRegardless()
-        applyPresentationFrame(target, alpha: 0.82, animated: animated)
-        try? persist()
-        journal("collapsed")
+        applyPresentationFrame(target, alpha: 0.82, animated: animated) { [weak self] in
+            self?.finishCollapse(to: target)
+        }
     }
 
     func expandForHost(animated: Bool = true) {
         guard store.active != nil else { panel.orderOut(nil); return }
-        guard store.collapsed else {
+        guard store.collapsed || collapsingToIcon else {
             expandedFromIconSource = nil
             expandedMovedBeyondSource = false
             expandedHoverExitStartedAt = nil
@@ -1428,7 +1490,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             panel.orderFrontRegardless()
             return
         }
-        let source = store.collapsed ? panel.frame : nil
+        let target = fittedExpandedFrame()
+        schedulePresentationFrame(target, alpha: 1, animated: animated)
+        collapsingToIcon = false
         store.collapsed = false
         store.collapsedHovered = false
         collapsedHoverStartedAt = nil
@@ -1439,16 +1503,18 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hostView.windowDragEnabled = false
         panel.minSize = NSSize(width: 280, height: 240)
         panel.orderFrontRegardless()
-        applyPresentationFrame(fittedExpandedFrame(near: source), alpha: 1, animated: animated && source != nil)
         try? persist()
         journal("expanded_host")
     }
 
     func expandFromCollapsedIcon() {
-        guard store.collapsed, store.active != nil else { return }
+        guard store.collapsed, !collapsedDragInProgress, store.active != nil else { return }
         let source = panel.frame
+        let target = fittedExpandedFrame(near: source)
         collapsedFrame = source
+        schedulePresentationFrame(target, alpha: 1, animated: true)
         store.collapsed = false
+        collapsingToIcon = false
         store.collapsedHovered = false
         collapsedHoverStartedAt = nil
         expandedFromIconSource = source
@@ -1458,7 +1524,6 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hostView.windowDragEnabled = false
         panel.minSize = NSSize(width: 280, height: 240)
         panel.orderFrontRegardless()
-        applyPresentationFrame(fittedExpandedFrame(near: source), alpha: 1, animated: true)
         armTerminalRetention()
         try? persist()
         journal("expanded_hover")
@@ -1500,6 +1565,20 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if visible != lastVisibility { lastVisibility = visible; journal("visibility") }
     }
 
+    func syncHostLifecycle() {
+        let running = !NSRunningApplication.runningApplications(withBundleIdentifier: hostBundle).isEmpty
+        if running {
+            hostPresenceObserved = true
+            hostMissingStartedAt = nil
+        } else if hostPresenceObserved, hostMissingStartedAt == nil {
+            hostMissingStartedAt = Date()
+        } else if let missingSince = hostMissingStartedAt,
+                  Date().timeIntervalSince(missingSince) >= 0.75 {
+            journal("host_terminated")
+            NSApp.terminate(nil)
+        }
+    }
+
     func syncCollapsedHover() {
         guard focusCollapseEnabled, store.collapsed, !applyingPresentationFrame,
               panel.isVisible, store.active != nil else {
@@ -1508,6 +1587,17 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         let hovering = panel.frame.insetBy(dx: -5, dy: -5).contains(NSEvent.mouseLocation)
+        if collapsedDragInProgress || NSEvent.pressedMouseButtons & 1 != 0 {
+            if store.collapsedHovered { store.collapsedHovered = false }
+            collapsedHoverStartedAt = nil
+            return
+        }
+        if collapsedHoverBlockedUntilExit {
+            if !hovering { collapsedHoverBlockedUntilExit = false }
+            if store.collapsedHovered { store.collapsedHovered = false }
+            collapsedHoverStartedAt = nil
+            return
+        }
         guard hovering else {
             if store.collapsedHovered { store.collapsedHovered = false }
             collapsedHoverStartedAt = nil
@@ -1820,12 +1910,19 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "completedAgentCheckAnimation": "pop-then-periodic-rock",
                                      "completedPlanRetentionSeconds": retentionSeconds,
                                      "focusCollapseEnabled": focusCollapseEnabled,
-                                     "presentation": store.collapsed ? "collapsed" : "expanded",
+                                     "hostLifecycle": "workspace-termination-observer-with-750ms-running-app-fallback",
+                                     "presentation": collapsingToIcon ? "collapsing" : (store.collapsed ? "collapsed" : "expanded"),
                                      "presentationTransitioning": applyingPresentationFrame,
                                      "alpha": panel?.alphaValue ?? 0,
                                      "collapsedHovered": store.collapsedHovered,
                                      "collapsedExpandDelay": collapsedExpandDelay,
+                                     "collapsedBorder": "1pt-white-17pct",
                                      "collapsedOpacity": 0.82,
+                                     "collapseAnimation": "expanded-plan-icon-converges-and-translates-to-collapsed-position",
+                                     "collapseVisualSwap": "after-frame-animation-completes",
+                                     "collapsedDragSuppressesExpansion": true,
+                                     "hoverExpandedFrameContainsSourceIcon": true,
+                                     "stepsSurfaceRGB": "#1F1F21",
                                      "collapsedPositionPersistence": "state.json:collapsedWindowFrame",
                                      "expandedPositionPersistence": "state.json:expandedWindowFrame",
                                      "completionRetentionTrigger": focusCollapseEnabled ? "host-focus-or-icon-expand" : "completion-time",
