@@ -860,7 +860,7 @@ struct PanelView: View {
             if let plan = store.active {
                 HStack(alignment: .center, spacing: PanelMetrics.columnGap) {
                     PlanIconSwitcher(store: store)
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    HStack(alignment: .center, spacing: 10) {
                         Text(plan.title)
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(CodexPalette.primary)
@@ -877,7 +877,6 @@ struct PanelView: View {
                             .overlay(Capsule().stroke(CodexPalette.border, lineWidth: 0.7))
                             .fixedSize()
                     }
-                    .padding(.top, 3)
                 }
                 .padding(.horizontal, PanelMetrics.inset)
                 .padding(.top, PanelMetrics.inset)
@@ -887,7 +886,6 @@ struct PanelView: View {
                     .fill(CodexPalette.border)
                     .frame(height: PanelMetrics.headerDivider)
                     .padding(.horizontal, PanelMetrics.inset)
-                    .padding(.bottom, 4)
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
@@ -896,6 +894,7 @@ struct PanelView: View {
                             }
                         }
                         .padding(.horizontal, PanelMetrics.inset)
+                        .padding(.top, 4)
                         .padding(.bottom, PanelMetrics.inset)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -1932,7 +1931,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "headerBrandVisible": false,
                                      "headerContents": "emoji-title-counter",
                                      "planIconMultilineAlignment": "title-block-center",
-                                     "counterAlignment": "title-baseline",
+                                     "counterAlignment": "plan-icon-center",
                                      "counterStyle": "rounded-outline",
                                      "palette": "codex-panel",
                                      "surfaceRGB": "#222224",
@@ -1966,6 +1965,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "planHoverExitPending": planHoverExitStartedAt != nil,
                                      "planHoverExitOrder": "tooltip-fade-icons-spring-tray-fade",
                                      "headerDividerVisible": true,
+                                     "stepsSurfaceStartsAtDivider": true,
                                      "headerDividerHeight": PanelMetrics.headerDivider,
                                      "headerDividerRGB": "#303032",
                                      "agentIconStyle": "illustrated-assets",

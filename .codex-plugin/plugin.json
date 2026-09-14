@@ -1,6 +1,6 @@
 {
   "name": "task-plan",
-  "version": "0.1.0+codex.20260914171918",
+  "version": "0.1.0+codex.20260914172413",
   "description": "Compact inline plans with a matching static Codex goal for long-running tasks.",
   "author": {
     "name": "Local developer"

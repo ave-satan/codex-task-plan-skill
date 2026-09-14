@@ -83,7 +83,8 @@ try {
   assert.equal(initialWindow.headerBrandVisible,false);
   assert.equal(initialWindow.headerContents,'emoji-title-counter');
   assert.equal(initialWindow.planIconMultilineAlignment,'title-block-center');
-  assert.equal(initialWindow.counterAlignment,'title-baseline');
+  assert.equal(initialWindow.counterAlignment,'plan-icon-center');
+  assert.equal(initialWindow.stepsSurfaceStartsAtDivider,true);
   assert.equal(initialWindow.counterStyle,'rounded-outline');
   assert.equal(initialWindow.palette,'codex-panel');
   assert.equal(initialWindow.surfaceRGB,'#222224');
