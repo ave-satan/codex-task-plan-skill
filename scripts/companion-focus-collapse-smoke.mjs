@@ -12,6 +12,7 @@ import { sendCompanion } from '../companion-bridge.mjs';
 const binary = process.env.COMPANION_BINARY;
 assert.ok(binary, 'Set COMPANION_BINARY to the built native companion');
 const useFixtureApps = process.env.FOCUS_USE_FIXTURE_APPS === '1';
+const keepFixture = process.env.KEEP_FOCUS_FIXTURE === '1';
 const hostBundle = process.env.FOCUS_HOST_BUNDLE
   ?? (useFixtureApps ? 'local.taskplan.focus-host' : 'com.apple.finder');
 const awayBundle = process.env.FOCUS_AWAY_BUNDLE
@@ -226,8 +227,12 @@ try {
   assert.equal(collapsing.window.transitionContent, 'plan-icon-only',
     'collapse must hide plan text and render only the icon while the frame shrinks');
   assert.ok(collapsing.window.width > 52, 'focus loss must visibly animate instead of snapping');
+  await sendCompanion(socket, { action: 'snapshot', name: 'collapse-transition' });
   assert.equal(collapsing.window.collapseAnimation,
     'expanded-plan-icon-converges-and-translates-to-collapsed-position');
+  assert.equal(collapsing.window.collapseVisualSwap,
+    'morphing-window-shell-with-icon-only-content',
+    'the visible window shell must shrink with the icon while text stays absent');
   const collapsed = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
     return state.visible && state.window.presentation === 'collapsed'
@@ -237,6 +242,7 @@ try {
   assert.equal(collapsed.window.height, 52);
   assert.equal(collapsed.window.presentationTransitioning, false);
   assert.equal(collapsed.window.transitionContent, 'collapsed-icon');
+  await sendCompanion(socket, { action: 'snapshot', name: 'collapsed-icon' });
 
   const center = { x: collapsed.window.x + 26, y: collapsed.window.y + 26 };
   await drag(center, { x: center.x + 70, y: center.y + 20 });
@@ -264,12 +270,18 @@ try {
   const companionFocused = (await sendCompanion(socket, { action: 'status' })).state;
   assert.equal(companionFocused.window.presentation, 'expanded', 'companion self-focus must not collapse the host window');
   await rapidFocusSequence();
-  const rapidStable = await eventually(async () => {
-    const state = (await sendCompanion(socket, { action: 'status' })).state;
-    return [hostBundle, 'local.taskplan.companion.prototype'].includes(state.frontmostBundle)
-      && state.window.presentation === 'expanded'
-      && !state.window.presentationTransitioning && Math.abs(state.window.width - 360) < 0.5 && state;
-  }, 'stable rapid focus transitions');
+  let rapidStable;
+  try {
+    rapidStable = await eventually(async () => {
+      const state = (await sendCompanion(socket, { action: 'status' })).state;
+      return [hostBundle, 'local.taskplan.companion.prototype'].includes(state.frontmostBundle)
+        && state.window.presentation === 'expanded'
+        && !state.window.presentationTransitioning && Math.abs(state.window.width - 360) < 0.5 && state;
+    }, 'stable rapid focus transitions');
+  } catch (error) {
+    console.error(JSON.stringify({ rapidFocusState: (await sendCompanion(socket, { action: 'status' })).state }));
+    throw error;
+  }
   assert.equal(rapidStable.expandedWindowFrame.width, 360, 'interrupted animations must not corrupt the saved expanded frame');
   await movePointer({ x: 100, y: 100 });
   await activate(awayBundle);
@@ -339,6 +351,7 @@ try {
     await Promise.all(focusApps.map(child => child.exitCode === null
       ? Promise.race([once(child, 'exit'), delay(3000).then(() => child.kill('SIGKILL'))])
       : undefined));
-    await rm(fixture, { recursive: true, force: true });
+    if (keepFixture) console.error(JSON.stringify({ fixture }));
+    else await rm(fixture, { recursive: true, force: true });
   }
 }

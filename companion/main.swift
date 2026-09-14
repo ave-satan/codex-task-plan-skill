@@ -78,6 +78,8 @@ private enum PanelMetrics {
     static let inset: CGFloat = 12
     static let iconColumn: CGFloat = 24
     static let planIconGlyph: CGFloat = 18
+    static let minimumWidth: CGFloat = 280
+    static let minimumHeight: CGFloat = 240
     static let columnGap: CGFloat = 8
     static let headerBottom: CGFloat = 8
     static let headerDivider: CGFloat = 0.5
@@ -738,31 +740,47 @@ struct TransitionPlanView: View {
     }
 
     var body: some View {
-        ZStack {
-            Circle()
-                .fill(CodexPalette.raised.opacity(0.68 * animation.compactProgress))
-                .overlay(Circle().stroke(Color.white.opacity(0.17 * animation.compactProgress), lineWidth: 1))
-                .frame(width: 42, height: 42)
-            if let active = store.active {
-                PlanEmojiCircle(plan: active, size: 38, highlighted: false, glyphSize: 27)
-                    .scaleEffect(0.67 + 0.33 * animation.compactProgress)
-                    .overlay(alignment: .bottomTrailing) {
-                        if store.plans.count > 1 {
-                            Text("+\(store.plans.count - 1)")
-                                .font(.system(size: 7, weight: .bold))
-                                .monospacedDigit()
-                                .foregroundStyle(CodexPalette.primary)
-                                .padding(.horizontal, 3)
-                                .frame(minWidth: 14, minHeight: 12)
-                                .background(Capsule().fill(CodexPalette.raised))
-                                .overlay(Capsule().stroke(CodexPalette.border, lineWidth: 0.6))
-                                .offset(x: 3, y: 3)
-                                .opacity(animation.compactProgress)
+        GeometryReader { geometry in
+            let compact = animation.compactProgress
+            let shellInset = 5 * compact
+            let shellRadius = 16 + 5 * compact
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: shellRadius, style: .continuous)
+                    .fill(CodexPalette.surface)
+                    .overlay(CodexPalette.raised.opacity(0.68 * compact)
+                        .clipShape(RoundedRectangle(cornerRadius: shellRadius, style: .continuous)))
+                    .overlay(RoundedRectangle(cornerRadius: shellRadius, style: .continuous)
+                        .stroke(CodexPalette.border.opacity(1 - compact), lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: shellRadius, style: .continuous)
+                        .stroke(Color.white.opacity(0.17 * compact), lineWidth: 1))
+                    .padding(shellInset)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+
+                if let active = store.active {
+                    ZStack {
+                        PlanEmojiCircle(plan: active, size: 38, highlighted: false, glyphSize: 27)
+                            .scaleEffect(0.67 + 0.33 * compact)
+                            .overlay(alignment: .bottomTrailing) {
+                                if store.plans.count > 1 {
+                                    Text("+\(store.plans.count - 1)")
+                                        .font(.system(size: 7, weight: .bold))
+                                        .monospacedDigit()
+                                        .foregroundStyle(CodexPalette.primary)
+                                        .padding(.horizontal, 3)
+                                        .frame(minWidth: 14, minHeight: 12)
+                                        .background(Capsule().fill(CodexPalette.raised))
+                                        .overlay(Capsule().stroke(CodexPalette.border, lineWidth: 0.6))
+                                        .offset(x: 3, y: 3)
+                                        .opacity(compact)
+                                }
+                            }
                         }
-                    }
+                    .frame(width: 52, height: 52)
+                    .offset(x: -2 * (1 - compact), y: -2 * (1 - compact))
+                }
             }
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
         }
-        .frame(width: 52, height: 52)
         .onAppear { animateTowardCurrentDirection() }
         .onChange(of: store.transitionToCollapsed) { _, _ in animateTowardCurrentDirection() }
     }
@@ -1106,7 +1124,9 @@ final class PanelHostingView<Content: View>: NSHostingView<Content> {
         }
         let initialFrame = window.frame
         let initialMouse = NSEvent.mouseLocation
-        let minSize = window.minSize
+        let minSize = resizeEnabled
+            ? NSSize(width: PanelMetrics.minimumWidth, height: PanelMetrics.minimumHeight)
+            : window.minSize
         while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
             if next.type == .leftMouseUp { break }
             let current = NSEvent.mouseLocation
@@ -1188,8 +1208,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var hostPresenceObserved = false
     var hostMissingStartedAt: Date?
     var presentationAnimationToken = 0
+    var pendingPresentationSync = false
     let retentionSeconds = max(0.1, Double(ProcessInfo.processInfo.environment["PLAN_COMPANION_RETENTION_SECONDS"] ?? "") ?? 30)
     let collapsedSize = NSSize(width: 52, height: 52)
+    let expandedMinimumSize = NSSize(width: PanelMetrics.minimumWidth, height: PanelMetrics.minimumHeight)
     let collapsedExpandDelay: TimeInterval = 0.70
 
     func terminalDate(_ plan: Plan) -> Date? {
@@ -1284,12 +1306,15 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.isMovableByWindowBackground = true
-        panel.minSize = NSSize(width: 280, height: 240)
+        panel.minSize = collapsedSize
         panel.appearance = NSAppearance(named: .darkAqua)
         panel.isOpaque = false
         panel.hasShadow = false
         panel.backgroundColor = .clear
         hostView = PanelHostingView(rootView: CompanionRootView(store: store))
+        if #available(macOS 13.0, *) {
+            hostView.sizingOptions = []
+        }
         panel.contentView = hostView
         panel.enableCursorRects()
         cursorTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
@@ -1363,10 +1388,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool { dismissed = true; panel.orderOut(nil); journal("dismissed"); return false }
     func windowDidMove(_ notification: Notification) {
-        guard !applyingPresentationFrame else { return }
+        guard !applyingPresentationFrame, !store.transitionIconOnly, !collapsingToIcon else { return }
         if store.collapsed {
             collapsedFrame = panel.frame
         } else {
+            guard panel.frame.width >= expandedMinimumSize.width,
+                  panel.frame.height >= expandedMinimumSize.height else { return }
             expandedFrame = panel.frame
             if let source = expandedFromIconSource {
                 let icon = planIconFrame(in: panel.frame)
@@ -1379,7 +1406,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         try? persist()
     }
     func windowDidResize(_ notification: Notification) {
-        guard !applyingPresentationFrame, !store.collapsed else { return }
+        guard !applyingPresentationFrame, !store.collapsed,
+              !store.transitionIconOnly, !collapsingToIcon else { return }
+        guard panel.frame.width >= expandedMinimumSize.width,
+              panel.frame.height >= expandedMinimumSize.height else { return }
         expandedFrame = panel.frame
         try? persist()
     }
@@ -1516,12 +1546,34 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.alphaValue = 0.82
         try? persist()
         journal("collapsed")
+        settlePendingPresentationSync()
+    }
+
+    func settlePendingPresentationSync() {
+        guard pendingPresentationSync else { return }
+        pendingPresentationSync = false
+        DispatchQueue.main.async { [weak self] in self?.syncPresentation() }
+    }
+
+    func finishExpansion(to target: NSRect, resizeEnabled: Bool) {
+        let token = presentationAnimationToken
+        applyingPresentationFrame = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.presentationAnimationToken == token,
+                  !self.store.collapsed, !self.collapsingToIcon else { return }
+            self.store.transitionIconOnly = false
+            self.panel.minSize = self.collapsedSize
+            self.panel.setFrame(target, display: true)
+            self.hostView.resizeEnabled = resizeEnabled
+            self.hostView.windowDragEnabled = false
+            self.applyingPresentationFrame = false
+            self.settlePendingPresentationSync()
+        }
     }
 
     func collapseToIcon(animated: Bool = false) {
         guard store.active != nil else { panel.orderOut(nil); return }
         guard !store.collapsed, !collapsingToIcon else { panel.orderFrontRegardless(); return }
-        if !applyingPresentationFrame { expandedFrame = panel.frame }
         let target = collapsedFrame ?? defaultCollapsedFrame()
         collapsedFrame = target
         expandedFromIconSource = nil
@@ -1537,7 +1589,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hostView.windowDragEnabled = true
         panel.minSize = collapsedSize
         panel.orderFrontRegardless()
-        applyPresentationFrame(target, alpha: 0.82, animated: animated) { [weak self] in
+        schedulePresentationFrame(target, alpha: 0.82, animated: animated) { [weak self] in
             self?.finishCollapse(to: target)
         }
     }
@@ -1545,12 +1597,16 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func expandForHost(animated: Bool = true) {
         guard store.active != nil else { panel.orderOut(nil); return }
         guard store.collapsed || collapsingToIcon else {
+            if applyingPresentationFrame {
+                panel.orderFrontRegardless()
+                return
+            }
             expandedFromIconSource = nil
             expandedMovedBeyondSource = false
             expandedHoverExitStartedAt = nil
             hostView.resizeEnabled = true
             hostView.windowDragEnabled = false
-            panel.minSize = NSSize(width: 280, height: 240)
+            panel.minSize = collapsedSize
             panel.alphaValue = 1
             panel.orderFrontRegardless()
             return
@@ -1559,7 +1615,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.transitionToCollapsed = false
         store.transitionIconOnly = true
         schedulePresentationFrame(target, alpha: 1, animated: animated) { [weak self] in
-            self?.store.transitionIconOnly = false
+            self?.finishExpansion(to: target, resizeEnabled: true)
         }
         collapsingToIcon = false
         store.collapsed = false
@@ -1568,9 +1624,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         expandedFromIconSource = nil
         expandedMovedBeyondSource = false
         expandedHoverExitStartedAt = nil
-        hostView.resizeEnabled = true
+        hostView.resizeEnabled = false
         hostView.windowDragEnabled = false
-        panel.minSize = NSSize(width: 280, height: 240)
+        panel.minSize = collapsedSize
         panel.orderFrontRegardless()
         try? persist()
         journal("expanded_host")
@@ -1584,7 +1640,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.transitionToCollapsed = false
         store.transitionIconOnly = true
         schedulePresentationFrame(target, alpha: 1, animated: true) { [weak self] in
-            self?.store.transitionIconOnly = false
+            self?.finishExpansion(to: target, resizeEnabled: false)
         }
         store.collapsed = false
         collapsingToIcon = false
@@ -1595,7 +1651,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         expandedHoverExitStartedAt = nil
         hostView.resizeEnabled = false
         hostView.windowDragEnabled = false
-        panel.minSize = NSSize(width: 280, height: 240)
+        panel.minSize = collapsedSize
         panel.orderFrontRegardless()
         armTerminalRetention()
         try? persist()
@@ -1604,6 +1660,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func syncPresentation(hostDidActivate: Bool = false) {
         guard panel != nil else { return }
+        if applyingPresentationFrame {
+            pendingPresentationSync = true
+            panel.orderFrontRegardless()
+            return
+        }
         guard store.active != nil, !dismissed else {
             panel.orderOut(nil)
             if lastVisibility != false { lastVisibility = false; journal("visibility") }
@@ -1616,7 +1677,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             store.collapsed = false
             hostView.resizeEnabled = true
             hostView.windowDragEnabled = false
-            panel.minSize = NSSize(width: 280, height: 240)
+            panel.minSize = collapsedSize
             panel.alphaValue = 1
             if visible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
             if visible != lastVisibility { lastVisibility = visible; journal("visibility") }
@@ -1881,7 +1942,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func validRestoredExpandedFrame() -> NSRect? {
         guard let saved = restoredExpandedFrame ?? restoredFrame,
               [saved.x, saved.y, saved.width, saved.height].allSatisfy({ $0.isFinite }),
-              saved.width >= panel.minSize.width, saved.height >= panel.minSize.height else { return nil }
+              saved.width >= expandedMinimumSize.width, saved.height >= expandedMinimumSize.height else { return nil }
         let frame = NSRect(x: saved.x, y: saved.y, width: saved.width, height: saved.height)
         return NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }) ? frame : nil
     }
@@ -1995,7 +2056,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "collapsedBorder": "1pt-white-17pct",
                                      "collapsedOpacity": 0.82,
                                      "collapseAnimation": "expanded-plan-icon-converges-and-translates-to-collapsed-position",
-                                     "collapseVisualSwap": "icon-only-during-frame-animation",
+                                     "collapseVisualSwap": "morphing-window-shell-with-icon-only-content",
                                      "collapsedDragSuppressesExpansion": true,
                                      "hoverExpandedFrameContainsSourceIcon": true,
                                      "stepsSurfaceRGB": "#1F1F21",
@@ -2013,8 +2074,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "x": frame.minX, "y": frame.minY,
                                      "mouseX": mouse.x, "mouseY": mouse.y,
                                      "width": frame.width, "height": frame.height,
-                                     "minimumWidth": panel?.minSize.width ?? 0,
-                                     "minimumHeight": panel?.minSize.height ?? 0]
+                                     "minimumWidth": store.collapsed ? collapsedSize.width : expandedMinimumSize.width,
+                                     "minimumHeight": store.collapsed ? collapsedSize.height : expandedMinimumSize.height]
         let plans: [[String: Any]] = store.plans.map {
             ["id": $0.id, "revision": $0.revision, "done": $0.done, "total": $0.steps.count,
              "icon": planEmoji($0)]
