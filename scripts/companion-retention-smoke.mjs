@@ -21,7 +21,7 @@ async function eventually(predicate) {
 
 const app = spawn(binary, [], { env: { ...process.env,
   PLAN_COMPANION_DATA: fixture, PLAN_COMPANION_SOCKET: socket,
-  PLAN_COMPANION_HOST: 'local.hidden.test', PLAN_COMPANION_RETENTION_SECONDS: '0.25' },
+  PLAN_COMPANION_HOST: 'local.hidden.test', PLAN_COMPANION_RETENTION_SECONDS: '1.5' },
   stdio: ['ignore', 'pipe', 'pipe'] });
 app.stderr.on('data', data => process.stderr.write(data));
 
@@ -33,7 +33,13 @@ try {
     source:'retention-test', sourceRevision:1, creationSequence:1,
     steps:[{id:'one', title:'Done', status:'completed'}]
   }});
-  assert.equal((await sendCompanion(socket, {action:'status'})).state.planCount, 1);
+  const initial = (await sendCompanion(socket, {action:'status'})).state;
+  assert.equal(initial.planCount, 1);
+  assert.ok(initial.activeRetentionFraction > 0.8 && initial.activeRetentionFraction <= 1);
+  await delay(280);
+  const advanced = (await sendCompanion(socket, {action:'status'})).state;
+  assert.ok(advanced.activeRetentionFraction < initial.activeRetentionFraction,
+    'visual countdown must follow the real retention deadline');
   await eventually(async () => (await sendCompanion(socket, {action:'status'})).state.planCount === 0);
   const persisted = JSON.parse(await readFile(join(fixture, 'state.json'), 'utf8'));
   assert.deepEqual(persisted.plans, []);

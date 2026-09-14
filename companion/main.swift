@@ -142,8 +142,11 @@ final class Store: ObservableObject {
     @Published var transitionIconOnly = false
     @Published var transitionToCollapsed = false
     @Published var collapsedHovered = false
+    @Published var retentionDeadlines: [String: Date] = [:]
+    @Published var retentionDuration: TimeInterval = 30
     var creationWatermarks: [String: Int] = [:]
     var changed: (() -> Void)?
+    var removeRequested: ((String) -> Void)?
     var active: Plan? { plans.first { $0.id == selected } }
     func select(_ id: String) {
         guard plans.contains(where: { $0.id == id }) else { return }
@@ -626,6 +629,7 @@ struct StepRow: View {
 }
 
 struct PlanEmojiCircle: View {
+    @ObservedObject var store: Store
     var plan: Plan
     var size: CGFloat = 30
     var highlighted = false
@@ -633,55 +637,109 @@ struct PlanEmojiCircle: View {
 
     var body: some View {
         ZStack {
-            Circle().fill(highlighted ? Color.white.opacity(0.055) : .clear)
+            Circle().fill(highlighted && plan.status != "completed" ? Color.white.opacity(0.055) : .clear)
             Text(planEmoji(plan))
                 .font(.system(size: min(glyphSize, size * 0.75)))
                 .multilineTextAlignment(.center)
                 .offset(y: 0.5)
         }
             .frame(width: size, height: size)
-            .overlay(alignment: .topTrailing) {
+            .overlay {
                 if plan.status == "completed" {
-                    PlanCompletionCheck(animationKey: plan.id + "|" + (plan.completedAt ?? "terminal"),
-                                        size: min(15, max(11, size * 0.36)))
-                        .offset(x: 2, y: -2)
+                    PlanCompletionLifecycle(
+                        animationKey: plan.id + "|" + (plan.completedAt ?? "terminal"),
+                        completedAt: plan.completedAt.flatMap(parseISODate),
+                        diameter: size + 4,
+                        deadline: store.retentionDeadlines[plan.id],
+                        retentionDuration: store.retentionDuration,
+                        hovered: highlighted
+                    )
                 }
             }
             .contentShape(Circle())
+            .onTapGesture {
+                guard plan.status == "completed" else { return }
+                store.removeRequested?(plan.id)
+            }
             .accessibilityLabel(plan.title)
     }
 }
 
-final class CompletionCheckAnimation: ObservableObject {
-    @Published var revealed = false
+final class CompletionLifecycleAnimation: ObservableObject {
+    @Published var checkScale: CGFloat = 1
+    @Published var checkOpacity = 1.0
+    @Published var blurOpacity = 0.94
+    @Published var ringVisible = false
 }
 
-struct PlanCompletionCheck: View {
+struct PlanCompletionLifecycle: View {
     var animationKey: String
-    var size: CGFloat
-    @StateObject private var animation = CompletionCheckAnimation()
+    var completedAt: Date?
+    var diameter: CGFloat
+    var deadline: Date?
+    var retentionDuration: TimeInterval
+    var hovered: Bool
+    @StateObject private var animation = CompletionLifecycleAnimation()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
-            Circle()
-                .fill(.regularMaterial)
-                .frame(width: size, height: size)
-                .opacity(animation.revealed ? 0 : 0.92)
-                .blur(radius: animation.revealed ? 0 : 2.5)
-            Image(systemName: "checkmark")
-                .font(.system(size: size * 0.6, weight: .heavy))
-                .foregroundStyle(CodexPalette.statusGreen)
-                .scaleEffect(animation.revealed ? 1 : 0.35)
-                .opacity(animation.revealed ? 1 : 0.45)
-        }
-        .frame(width: size, height: size)
-        .id(animationKey)
-        .onAppear {
-            guard !animation.revealed else { return }
-            withAnimation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.68)) {
-                animation.revealed = true
+            if animation.ringVisible {
+                TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
+                    Circle()
+                        .trim(from: 0, to: remainingFraction(at: context.date))
+                        .stroke(CodexPalette.primary.opacity(0.42),
+                                style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+                Circle()
+                    .fill(.regularMaterial)
+                    .opacity(hovered ? 0.94 : 0)
+                    .blur(radius: hovered ? 2.2 : 0)
+                Image(systemName: "xmark")
+                    .font(.system(size: diameter * 0.34, weight: .semibold))
+                    .foregroundStyle(CodexPalette.primary)
+                    .opacity(hovered ? 1 : 0)
+                    .scaleEffect(hovered ? 1 : 0.72)
+            } else {
+                Circle()
+                    .fill(.regularMaterial)
+                    .opacity(animation.blurOpacity)
+                    .blur(radius: animation.blurOpacity * 3)
+                Image(systemName: "checkmark")
+                    .font(.system(size: diameter * 0.48, weight: .heavy))
+                    .foregroundStyle(CodexPalette.statusGreen)
+                    .scaleEffect(animation.checkScale)
+                    .opacity(animation.checkOpacity)
             }
+        }
+        .frame(width: diameter, height: diameter)
+        .id(animationKey)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovered)
+        .onAppear(perform: startSequence)
+    }
+
+    private func remainingFraction(at now: Date) -> CGFloat {
+        guard let deadline else { return 1 }
+        return CGFloat(max(0, min(1, deadline.timeIntervalSince(now) / max(0.1, retentionDuration))))
+    }
+
+    private func startSequence() {
+        if reduceMotion || completedAt.map({ Date().timeIntervalSince($0) > 0.8 }) == true {
+            animation.checkOpacity = 0
+            animation.blurOpacity = 0
+            animation.ringVisible = true
+            return
+        }
+        withAnimation(.easeOut(duration: 0.42)) {
+            animation.checkScale = 1.34
+            animation.blurOpacity = 0
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.46) {
+            withAnimation(.easeOut(duration: 0.16)) { animation.checkOpacity = 0 }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.62) {
+            animation.ringVisible = true
         }
     }
 }
@@ -697,7 +755,8 @@ struct CollapsedPlanView: View {
                 .scaleEffect(store.collapsedHovered ? 1.12 : 1)
                 .animation(.spring(response: 0.2, dampingFraction: 0.72), value: store.collapsedHovered)
             if let active = store.active {
-                PlanEmojiCircle(plan: active, size: 38, highlighted: false, glyphSize: 27)
+                PlanEmojiCircle(store: store, plan: active, size: 38,
+                                highlighted: store.collapsedHovered, glyphSize: 27)
                     .overlay(alignment: .bottomTrailing) {
                         if store.plans.count > 1 {
                             Text("+\(store.plans.count - 1)")
@@ -758,7 +817,7 @@ struct TransitionPlanView: View {
 
                 if let active = store.active {
                     ZStack {
-                        PlanEmojiCircle(plan: active, size: 38, highlighted: false, glyphSize: 27)
+                        PlanEmojiCircle(store: store, plan: active, size: 38, highlighted: false, glyphSize: 27)
                             .scaleEffect(0.67 + 0.33 * compact)
                             .overlay(alignment: .bottomTrailing) {
                                 if store.plans.count > 1 {
@@ -831,7 +890,7 @@ struct PlanIconSwitcher: View {
                         .zIndex(0)
                 }
                 HStack(spacing: 4) {
-                    PlanEmojiCircle(plan: active, size: PanelMetrics.iconColumn,
+                    PlanEmojiCircle(store: store, plan: active, size: PanelMetrics.iconColumn,
                                     highlighted: store.hoveredPlanID == active.id)
                         .overlay(alignment: .bottomTrailing) {
                             if !store.planSwitcherExpanded, !otherPlans.isEmpty {
@@ -852,7 +911,7 @@ struct PlanIconSwitcher: View {
                                 store.select(plan.id)
                                 withAnimation(.easeOut(duration: 0.14)) { store.planSwitcherExpanded = false }
                             } label: {
-                                PlanEmojiCircle(plan: plan, size: PanelMetrics.iconColumn,
+                                PlanEmojiCircle(store: store, plan: plan, size: PanelMetrics.iconColumn,
                                                 highlighted: store.hoveredPlanID == plan.id)
                             }
                             .buttonStyle(.plain)
@@ -1253,6 +1312,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func scheduleExpiry() {
         expiryTimer?.invalidate(); expiryTimer = nil
+        store.retentionDuration = retentionSeconds
+        store.retentionDeadlines = Dictionary(uniqueKeysWithValues: store.plans.compactMap { plan in
+            expiryDate(plan).map { (plan.id, $0) }
+        })
         let now = Date()
         let next = store.plans.compactMap(expiryDate)
             .filter { $0 > now }.min()
@@ -1329,11 +1392,16 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return event }
             let pointer = NSEvent.mouseLocation
             if let selected = self.planSwitcherSelection(at: pointer) {
+                if self.removeCompletedPlanIfReady(selected) { return nil }
                 self.store.select(selected)
                 return nil
             }
+            if self.activePlanIconContains(pointer), let selected = self.store.selected,
+               self.removeCompletedPlanIfReady(selected) { return nil }
             if self.panel.frame.contains(pointer), self.canBeginWindowDrag(at: pointer) {
                 let wasCollapsed = self.store.collapsed
+                let dragStart = self.panel.frame.origin
+                let activeAtDragStart = self.store.active?.id
                 if wasCollapsed {
                     self.collapsedDragInProgress = true
                     self.store.collapsedHovered = false
@@ -1343,6 +1411,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if wasCollapsed {
                     self.collapsedDragInProgress = false
                     self.collapsedHoverBlockedUntilExit = true
+                    let dx = self.panel.frame.minX - dragStart.x
+                    let dy = self.panel.frame.minY - dragStart.y
+                    if hypot(dx, dy) < 2, let activeAtDragStart {
+                        _ = self.removeCompletedPlanIfReady(activeAtDragStart)
+                    }
                 }
                 return nil
             }
@@ -1354,6 +1427,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return event
         }
         store.changed = { [weak self] in self?.stateChanged() }
+        store.removeRequested = { [weak self] id in
+            _ = self?.removeCompletedPlanIfReady(id)
+        }
         let center = NSWorkspace.shared.notificationCenter
         observers.append(center.addObserver(forName: NSWorkspace.didActivateApplicationNotification,
                                              object: nil, queue: .main) { [weak self] note in
@@ -1452,6 +1528,32 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let itemX = firstX + CGFloat(index) * stride
         guard point.x <= itemX + PanelMetrics.iconColumn else { return nil }
         return otherPlans[index].id
+    }
+
+    func activePlanIconContains(_ point: NSPoint) -> Bool {
+        guard !store.collapsed, panel.frame.contains(point) else { return false }
+        let originX = panel.frame.minX + PanelMetrics.inset
+        let zoneY = panel.frame.maxY - PanelMetrics.inset - PanelMetrics.iconColumn - 6
+        return NSRect(x: originX - 4, y: zoneY,
+                      width: PanelMetrics.iconColumn + 8,
+                      height: PanelMetrics.iconColumn + 12).contains(point)
+    }
+
+    @discardableResult func removeCompletedPlanIfReady(_ id: String) -> Bool {
+        guard let plan = store.plans.first(where: { $0.id == id }), plan.status == "completed" else { return false }
+        if let completedAt = plan.completedAt.flatMap(parseISODate),
+           Date().timeIntervalSince(completedAt) < 0.62 { return false }
+        removePlan(id, event: "plan_removed_by_user")
+        return true
+    }
+
+    func removePlan(_ id: String, event: String) {
+        guard store.plans.contains(where: { $0.id == id }) else { return }
+        store.plans.removeAll { $0.id == id }
+        retentionStartedAt.removeValue(forKey: id)
+        if store.selected == id { store.selected = store.plans.last?.id }
+        stateChanged()
+        journal(event)
     }
 
     func screenFor(_ frame: NSRect) -> NSScreen? {
@@ -1825,7 +1927,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
     func syncPlanSwitcherHover() {
-        guard panel?.isVisible == true, !store.collapsed, let active = store.active, store.plans.count > 1 else {
+        guard panel?.isVisible == true, !store.collapsed, let active = store.active else {
             planTooltip.hide()
             planHoverExitStartedAt = nil
             if store.hoveredPlanID != nil { store.hoveredPlanID = nil }
@@ -1848,7 +1950,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             planTooltip.hide()
             planHoverExitStartedAt = nil
             if store.hoveredPlanID != active.id { store.hoveredPlanID = active.id }
-            if !store.planSwitcherExpanded {
+            if !others.isEmpty, !store.planSwitcherExpanded {
                 withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
                     store.planSwitcherExpanded = true
                 }
@@ -2063,7 +2165,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "collapsedPositionPersistence": "state.json:collapsedWindowFrame",
                                      "expandedPositionPersistence": "state.json:expandedWindowFrame",
                                      "completionRetentionTrigger": focusCollapseEnabled ? "host-focus-or-icon-expand" : "completion-time",
-                                     "completedPlanCheck": "green-pop-with-dissolving-material-blur",
+                                     "completedPlanCheck": "centered-green-grow-with-dissolving-material-blur",
+                                     "completedPlanLifecycle": "centered-check-to-deadline-countdown-ring",
+                                     "completedPlanCountdown": "clockwise-shrinking-ring-matches-collapsed-border",
+                                     "completedPlanHoverAction": "blurred-x-immediate-remove",
                                      "windowDragSurface": "all-content-except-resize-and-plan-switcher",
                                      "pendingStepAlignment": "reserved-column",
                                      "noteAnimation": "blur-fade-rise-on-insert-and-change",
@@ -2080,6 +2185,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ["id": $0.id, "revision": $0.revision, "done": $0.done, "total": $0.steps.count,
              "icon": planEmoji($0)]
         }
+        let activeRetentionFraction: Any = store.active.flatMap { plan in
+            store.retentionDeadlines[plan.id].map {
+                max(0, min(1, $0.timeIntervalSinceNow / max(0.1, retentionSeconds)))
+            }
+        } ?? NSNull()
         return ["pid": Int(getpid()), "selected": store.selected ?? NSNull(), "planCount": store.plans.count,
                 "selectorVisible": false, "planSwitcherAvailable": store.plans.count > 1,
                 "planSwitcherExpanded": store.planSwitcherExpanded,
@@ -2088,6 +2198,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "frontmostBundle": NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown",
                 "eventCount": store.eventCount, "selectedRevision": store.active?.revision ?? 0,
                 "activeStatus": store.active?.status ?? NSNull(),
+                "activeRetentionFraction": activeRetentionFraction,
                 "retentionArmedPlanIDs": Array(retentionStartedAt.keys).sorted(),
                 "expandedWindowFrame": expandedFrame.map { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] } ?? NSNull(),
                 "collapsedWindowFrame": collapsedFrame.map { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] } ?? NSNull(),
@@ -2127,10 +2238,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 store.select(id)
             case "remove":
                 guard let id = command.id, store.plans.contains(where: { $0.id == id }) else { throw NSError(domain: "Unknown plan", code: 4) }
-                store.plans.removeAll { $0.id == id }
-                retentionStartedAt.removeValue(forKey: id)
-                if store.selected == id { store.selected = store.plans.last?.id }
-                stateChanged()
+                removePlan(id, event: "plan_removed")
             case "set_focus_collapse":
                 guard let enabled = command.enabled else { throw NSError(domain: "Missing enabled preference", code: 13) }
                 focusCollapseEnabled = enabled
@@ -2157,6 +2265,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             case "cursor_probe":
                 guard let x = command.x, let y = command.y else { throw NSError(domain: "Missing cursor probe point", code: 9) }
                 return ["ok": true, "kind": hostView.resizeCursorKind(at: NSPoint(x: x, y: y)) ?? "arrow", "state": snapshot()]
+            case "completion_click_probe":
+                guard let x = command.x, let y = command.y else { throw NSError(domain: "Missing completion probe point", code: 9) }
+                let point = NSPoint(x: panel.frame.minX + x, y: panel.frame.minY + y)
+                let removed = activePlanIconContains(point)
+                    && store.selected.map(removeCompletedPlanIfReady) == true
+                return ["ok": true, "removed": removed, "state": snapshot()]
             case "status": break
             case "snapshot":
                 guard let name = command.name, name.range(of: "^[a-zA-Z0-9_-]{1,60}$", options: .regularExpression) != nil else { throw NSError(domain: "Invalid snapshot name", code: 5) }

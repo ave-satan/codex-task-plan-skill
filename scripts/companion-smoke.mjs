@@ -120,7 +120,7 @@ try {
   assert.equal(initialWindow.collapsedExpandDelay,0.7);
   assert.equal(initialWindow.collapsedDragSuppressesExpansion,true);
   assert.equal(initialWindow.hoverExpandedFrameContainsSourceIcon,true);
-  assert.equal(initialWindow.collapseVisualSwap,'icon-only-during-frame-animation');
+  assert.equal(initialWindow.collapseVisualSwap,'morphing-window-shell-with-icon-only-content');
   assert.equal(initialWindow.hostLifecycle,'workspace-termination-observer-with-750ms-running-app-fallback');
   assert.equal(initialWindow.agentIconStyle,'illustrated-assets');
   assert.equal(initialWindow.agentPulseStyle,'subtle-opacity-contrast');
@@ -137,6 +137,10 @@ try {
   assert.equal(initialWindow.completedAgentCheck,'green-no-background');
   assert.equal(initialWindow.completedAgentCheckAnimation,'pop-then-periodic-rock');
   assert.equal(initialWindow.completedPlanRetentionSeconds,30);
+  assert.equal(initialWindow.completedPlanCheck,'centered-green-grow-with-dissolving-material-blur');
+  assert.equal(initialWindow.completedPlanLifecycle,'centered-check-to-deadline-countdown-ring');
+  assert.equal(initialWindow.completedPlanCountdown,'clockwise-shrinking-ring-matches-collapsed-border');
+  assert.equal(initialWindow.completedPlanHoverAction,'blurred-x-immediate-remove');
   assert.equal(initialWindow.pendingStepAlignment,'reserved-column');
   assert.equal(initialWindow.noteAnimation,'blur-fade-rise-on-insert-and-change');
   assert.equal(initialWindow.noteTopSpacing,3);
