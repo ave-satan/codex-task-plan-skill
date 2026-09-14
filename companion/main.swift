@@ -137,6 +137,8 @@ final class Store: ObservableObject {
     @Published var planSwitcherExpanded = false
     @Published var hoveredPlanID: String?
     @Published var collapsed = false
+    @Published var transitionIconOnly = false
+    @Published var transitionToCollapsed = false
     @Published var collapsedHovered = false
     var creationWatermarks: [String: Int] = [:]
     var changed: (() -> Void)?
@@ -715,12 +717,72 @@ struct CollapsedPlanView: View {
     }
 }
 
+final class TransitionIconAnimation: ObservableObject {
+    @Published var compactProgress: CGFloat
+
+    init(compactProgress: CGFloat) {
+        self.compactProgress = compactProgress
+    }
+}
+
+struct TransitionPlanView: View {
+    @ObservedObject var store: Store
+    @StateObject private var animation: TransitionIconAnimation
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(store: Store) {
+        self.store = store
+        _animation = StateObject(wrappedValue: TransitionIconAnimation(
+            compactProgress: store.transitionToCollapsed ? 0 : 1
+        ))
+    }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(CodexPalette.raised.opacity(0.68 * animation.compactProgress))
+                .overlay(Circle().stroke(Color.white.opacity(0.17 * animation.compactProgress), lineWidth: 1))
+                .frame(width: 42, height: 42)
+            if let active = store.active {
+                PlanEmojiCircle(plan: active, size: 38, highlighted: false, glyphSize: 27)
+                    .scaleEffect(0.67 + 0.33 * animation.compactProgress)
+                    .overlay(alignment: .bottomTrailing) {
+                        if store.plans.count > 1 {
+                            Text("+\(store.plans.count - 1)")
+                                .font(.system(size: 7, weight: .bold))
+                                .monospacedDigit()
+                                .foregroundStyle(CodexPalette.primary)
+                                .padding(.horizontal, 3)
+                                .frame(minWidth: 14, minHeight: 12)
+                                .background(Capsule().fill(CodexPalette.raised))
+                                .overlay(Capsule().stroke(CodexPalette.border, lineWidth: 0.6))
+                                .offset(x: 3, y: 3)
+                                .opacity(animation.compactProgress)
+                        }
+                    }
+            }
+        }
+        .frame(width: 52, height: 52)
+        .onAppear { animateTowardCurrentDirection() }
+        .onChange(of: store.transitionToCollapsed) { _, _ in animateTowardCurrentDirection() }
+    }
+
+    private func animateTowardCurrentDirection() {
+        withAnimation(reduceMotion ? nil : .timingCurve(0.22, 0.8, 0.3, 1, duration: 0.22)) {
+            animation.compactProgress = store.transitionToCollapsed ? 1 : 0
+        }
+    }
+}
+
 struct CompanionRootView: View {
     @ObservedObject var store: Store
 
     @ViewBuilder var body: some View {
         if store.collapsed {
             CollapsedPlanView(store: store)
+        } else if store.transitionIconOnly {
+            TransitionPlanView(store: store)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             PanelView(store: store)
         }
@@ -1432,13 +1494,14 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    func schedulePresentationFrame(_ frame: NSRect, alpha: CGFloat, animated: Bool) {
+    func schedulePresentationFrame(_ frame: NSRect, alpha: CGFloat, animated: Bool,
+                                   completion: (() -> Void)? = nil) {
         presentationAnimationToken += 1
         let reservation = presentationAnimationToken
         applyingPresentationFrame = true
         DispatchQueue.main.async { [weak self] in
             guard let self, self.presentationAnimationToken == reservation else { return }
-            self.applyPresentationFrame(frame, alpha: alpha, animated: animated)
+            self.applyPresentationFrame(frame, alpha: alpha, animated: animated, completion: completion)
         }
     }
 
@@ -1446,6 +1509,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard collapsingToIcon else { return }
         collapsingToIcon = false
         store.collapsed = true
+        store.transitionIconOnly = false
         hostView.resizeEnabled = false
         hostView.windowDragEnabled = true
         panel.minSize = collapsedSize
@@ -1468,6 +1532,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.hoveredPlanID = nil
         planTooltip.hide(animated: true)
         collapsingToIcon = true
+        store.transitionToCollapsed = true
+        store.transitionIconOnly = true
         hostView.resizeEnabled = false
         hostView.windowDragEnabled = true
         panel.minSize = collapsedSize
@@ -1491,7 +1557,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         let target = fittedExpandedFrame()
-        schedulePresentationFrame(target, alpha: 1, animated: animated)
+        store.transitionToCollapsed = false
+        store.transitionIconOnly = true
+        schedulePresentationFrame(target, alpha: 1, animated: animated) { [weak self] in
+            self?.store.transitionIconOnly = false
+        }
         collapsingToIcon = false
         store.collapsed = false
         store.collapsedHovered = false
@@ -1512,7 +1582,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let source = panel.frame
         let target = fittedExpandedFrame(near: source)
         collapsedFrame = source
-        schedulePresentationFrame(target, alpha: 1, animated: true)
+        store.transitionToCollapsed = false
+        store.transitionIconOnly = true
+        schedulePresentationFrame(target, alpha: 1, animated: true) { [weak self] in
+            self?.store.transitionIconOnly = false
+        }
         store.collapsed = false
         collapsingToIcon = false
         store.collapsedHovered = false
@@ -1913,13 +1987,15 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "hostLifecycle": "workspace-termination-observer-with-750ms-running-app-fallback",
                                      "presentation": collapsingToIcon ? "collapsing" : (store.collapsed ? "collapsed" : "expanded"),
                                      "presentationTransitioning": applyingPresentationFrame,
+                                     "transitionContent": store.collapsed ? "collapsed-icon" :
+                                        (store.transitionIconOnly ? "plan-icon-only" : "full-content"),
                                      "alpha": panel?.alphaValue ?? 0,
                                      "collapsedHovered": store.collapsedHovered,
                                      "collapsedExpandDelay": collapsedExpandDelay,
                                      "collapsedBorder": "1pt-white-17pct",
                                      "collapsedOpacity": 0.82,
                                      "collapseAnimation": "expanded-plan-icon-converges-and-translates-to-collapsed-position",
-                                     "collapseVisualSwap": "after-frame-animation-completes",
+                                     "collapseVisualSwap": "icon-only-during-frame-animation",
                                      "collapsedDragSuppressesExpansion": true,
                                      "hoverExpandedFrameContainsSourceIcon": true,
                                      "stepsSurfaceRGB": "#1F1F21",

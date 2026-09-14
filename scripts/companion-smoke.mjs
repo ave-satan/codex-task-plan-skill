@@ -119,7 +119,7 @@ try {
   assert.equal(initialWindow.collapsedExpandDelay,0.7);
   assert.equal(initialWindow.collapsedDragSuppressesExpansion,true);
   assert.equal(initialWindow.hoverExpandedFrameContainsSourceIcon,true);
-  assert.equal(initialWindow.collapseVisualSwap,'after-frame-animation-completes');
+  assert.equal(initialWindow.collapseVisualSwap,'icon-only-during-frame-animation');
   assert.equal(initialWindow.hostLifecycle,'workspace-termination-observer-with-750ms-running-app-fallback');
   assert.equal(initialWindow.agentIconStyle,'illustrated-assets');
   assert.equal(initialWindow.agentPulseStyle,'subtle-opacity-contrast');

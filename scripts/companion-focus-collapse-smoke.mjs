@@ -223,6 +223,8 @@ try {
   const collapsing = (await sendCompanion(socket, { action: 'status' })).state;
   assert.equal(collapsing.window.presentation, 'collapsing');
   assert.equal(collapsing.window.presentationTransitioning, true);
+  assert.equal(collapsing.window.transitionContent, 'plan-icon-only',
+    'collapse must hide plan text and render only the icon while the frame shrinks');
   assert.ok(collapsing.window.width > 52, 'focus loss must visibly animate instead of snapping');
   assert.equal(collapsing.window.collapseAnimation,
     'expanded-plan-icon-converges-and-translates-to-collapsed-position');
@@ -234,6 +236,7 @@ try {
   assert.equal(collapsed.window.width, 52);
   assert.equal(collapsed.window.height, 52);
   assert.equal(collapsed.window.presentationTransitioning, false);
+  assert.equal(collapsed.window.transitionContent, 'collapsed-icon');
 
   const center = { x: collapsed.window.x + 26, y: collapsed.window.y + 26 };
   await drag(center, { x: center.x + 70, y: center.y + 20 });
@@ -254,6 +257,9 @@ try {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
     return state.window.presentation === 'expanded' && state.window.resizable && state;
   }, 'host re-expansion');
+  const hostExpanded = (await sendCompanion(socket, { action: 'status' })).state;
+  assert.equal(hostExpanded.window.transitionContent, 'full-content',
+    'expanded content must appear only after the frame animation completes');
   await activate('local.taskplan.companion.prototype', 120000);
   const companionFocused = (await sendCompanion(socket, { action: 'status' })).state;
   assert.equal(companionFocused.window.presentation, 'expanded', 'companion self-focus must not collapse the host window');
