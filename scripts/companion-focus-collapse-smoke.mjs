@@ -332,6 +332,30 @@ try {
   assert.equal(hoverExpanded.window.stepsSurfaceRGB, '#1F1F21');
   assert.equal((await sendCompanion(socket, { action: 'cursor_probe', x: 1, y: 1 })).kind, 'arrow');
 
+  const focusedFrameBefore = hoverExpanded.expandedWindowFrame;
+  const unfocusedDragStart = {
+    x: hoverExpanded.window.x + 150,
+    y: hoverExpanded.window.y + hoverExpanded.window.height - 70,
+  };
+  await drag(unfocusedDragStart, { x: unfocusedDragStart.x + 45, y: unfocusedDragStart.y - 30 });
+  const movedUnfocused = await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return Math.abs(state.unfocusedExpandedWindowFrame.x - hoverExpanded.window.x) > 30 && state;
+  }, 'independent unfocused expanded position');
+  assert.deepEqual(movedUnfocused.expandedWindowFrame, focusedFrameBefore,
+    'moving the unfocused expanded window must not overwrite the focused frame');
+  assert.equal(movedUnfocused.window.unfocusedExpandedPositionPersistence,
+    'state.json:unfocusedExpandedWindowFrame');
+
+  await activate(hostBundle);
+  const focusedAgain = await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.window.presentation === 'expanded' && state.window.resizable
+      && Math.abs(state.window.x - focusedFrameBefore.x) < 1 && state;
+  }, 'focused position restored after unfocused drag');
+  assert.deepEqual(focusedAgain.unfocusedExpandedWindowFrame, movedUnfocused.unfocusedExpandedWindowFrame,
+    'restoring the focused frame must preserve the independent unfocused frame');
+
   await sendCompanion(socket, { action: 'remove', id: 'plan-1' });
   await sendCompanion(socket, { action: 'remove', id: 'plan-2' });
   const empty = await eventually(async () => {

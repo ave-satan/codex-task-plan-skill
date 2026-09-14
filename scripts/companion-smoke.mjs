@@ -148,6 +148,7 @@ try {
   assert.equal(initialWindow.stepVerticalPadding,3);
   assert.equal(initialWindow.stepSpacing,0);
   assert.equal(initialWindow.framePersistence,'state.json');
+  assert.equal(initialWindow.unfocusedExpandedPositionPersistence,'state.json:unfocusedExpandedWindowFrame');
   assert.equal(initialWindow.minimumWidth,280);
   const bundledIcons = (await readdir(join(binary,'..','..','Resources','agent-icons'))).filter(name=>name.endsWith('.png'));
   assert.equal(bundledIcons.length,10);

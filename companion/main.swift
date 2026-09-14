@@ -116,6 +116,7 @@ struct Saved: Codable {
     var creationWatermarks: [String: Int]?
     var windowFrame: WindowFrame? = nil
     var expandedWindowFrame: WindowFrame? = nil
+    var unfocusedExpandedWindowFrame: WindowFrame? = nil
     var collapsedWindowFrame: WindowFrame? = nil
     var collapseWhenUnfocused: Bool? = nil
     var retentionStartedAt: [String: String]? = nil
@@ -1234,8 +1235,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var dataURL: URL!
     var restoredFrame: WindowFrame?
     var restoredExpandedFrame: WindowFrame?
+    var restoredUnfocusedExpandedFrame: WindowFrame?
     var restoredCollapsedFrame: WindowFrame?
     var expandedFrame: NSRect?
+    var unfocusedExpandedFrame: NSRect?
     var collapsedFrame: NSRect?
     var focusCollapseEnabled = false
     var retentionStartedAt: [String: Date] = [:]
@@ -1325,6 +1328,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 store.creationWatermarks = saved.creationWatermarks ?? [:]
                 restoredFrame = saved.windowFrame
                 restoredExpandedFrame = saved.expandedWindowFrame ?? saved.windowFrame
+                restoredUnfocusedExpandedFrame = saved.unfocusedExpandedWindowFrame
+                    ?? saved.expandedWindowFrame ?? saved.windowFrame
                 restoredCollapsedFrame = saved.collapsedWindowFrame
                 focusCollapseEnabled = saved.collapseWhenUnfocused
                     ?? (env["PLAN_COMPANION_FOCUS_COLLAPSE"] == "1")
@@ -1433,6 +1438,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             panel.setFrameTopLeftPoint(NSPoint(x: screen.visibleFrame.maxX - 430, y: screen.visibleFrame.maxY - 65))
             expandedFrame = panel.frame
         }
+        unfocusedExpandedFrame = validRestoredUnfocusedExpandedFrame()
         collapsedFrame = validRestoredCollapsedFrame()
         if pruneExpiredPlans() { try? persist() }
         scheduleExpiry()
@@ -1447,13 +1453,15 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } else {
             guard panel.frame.width >= expandedMinimumSize.width,
                   panel.frame.height >= expandedMinimumSize.height else { return }
-            expandedFrame = panel.frame
             if let source = expandedFromIconSource {
+                unfocusedExpandedFrame = panel.frame
                 let icon = planIconFrame(in: panel.frame)
                 if expandedMovedBeyondSource || !icon.intersects(source) {
                     expandedMovedBeyondSource = true
                     collapsedFrame = clampedCollapsedFrame(centeredAt: NSPoint(x: icon.midX, y: icon.midY))
                 }
+            } else {
+                expandedFrame = panel.frame
             }
         }
         try? persist()
@@ -1463,7 +1471,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
               !store.transitionIconOnly, !collapsingToIcon else { return }
         guard panel.frame.width >= expandedMinimumSize.width,
               panel.frame.height >= expandedMinimumSize.height else { return }
-        expandedFrame = panel.frame
+        if expandedFromIconSource != nil { unfocusedExpandedFrame = panel.frame }
+        else { expandedFrame = panel.frame }
         try? persist()
     }
 
@@ -1561,7 +1570,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func fittedExpandedFrame(near iconFrame: NSRect? = nil) -> NSRect {
-        var candidate = expandedFrame ?? panel.frame
+        var candidate = iconFrame == nil
+            ? (expandedFrame ?? panel.frame)
+            : (unfocusedExpandedFrame ?? expandedFrame ?? panel.frame)
         guard let iconFrame else {
             let screen = screenFor(candidate) ?? NSScreen.main
             return screen.map { clamped(candidate, to: $0.visibleFrame) } ?? candidate
@@ -1656,6 +1667,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard !store.collapsed, !collapsingToIcon else { panel.orderFrontRegardless(); return }
         let target = collapsedFrame ?? defaultCollapsedFrame()
         collapsedFrame = target
+        if expandedFromIconSource != nil,
+           panel.frame.width >= expandedMinimumSize.width,
+           panel.frame.height >= expandedMinimumSize.height {
+            unfocusedExpandedFrame = panel.frame
+        }
         expandedFromIconSource = nil
         expandedMovedBeyondSource = false
         expandedHoverExitStartedAt = nil
@@ -1679,6 +1695,23 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard store.collapsed || collapsingToIcon else {
             if applyingPresentationFrame {
                 panel.orderFrontRegardless()
+                return
+            }
+            if expandedFromIconSource != nil {
+                unfocusedExpandedFrame = panel.frame
+                let target = fittedExpandedFrame()
+                expandedFromIconSource = nil
+                expandedMovedBeyondSource = false
+                expandedHoverExitStartedAt = nil
+                store.collapsedHovered = false
+                hostView.resizeEnabled = false
+                hostView.windowDragEnabled = false
+                panel.orderFrontRegardless()
+                schedulePresentationFrame(target, alpha: 1, animated: animated) { [weak self] in
+                    self?.finishExpansion(to: target, resizeEnabled: true)
+                }
+                try? persist()
+                journal("expanded_host_position_restored")
                 return
             }
             expandedFromIconSource = nil
@@ -2001,8 +2034,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         syncPresentation(); journal("state_changed")
     }
     func persist() throws {
-        let currentExpanded = expandedFrame ?? (!store.collapsed ? panel?.frame : nil)
-        let savedExpanded = currentExpanded.map { WindowFrame(x: $0.minX, y: $0.minY, width: $0.width, height: $0.height) }
+        let savedExpanded = expandedFrame.map { WindowFrame(x: $0.minX, y: $0.minY, width: $0.width, height: $0.height) }
+        let currentUnfocusedExpanded = unfocusedExpandedFrame
+            ?? (expandedFromIconSource != nil && !store.collapsed ? panel?.frame : nil)
+        let savedUnfocusedExpanded = currentUnfocusedExpanded.map {
+            WindowFrame(x: $0.minX, y: $0.minY, width: $0.width, height: $0.height)
+        }
         let currentCollapsed = collapsedFrame ?? (store.collapsed ? panel?.frame : nil)
         let savedCollapsed = currentCollapsed.map { WindowFrame(x: $0.minX, y: $0.minY, width: $0.width, height: $0.height) }
         let formatter = ISO8601DateFormatter()
@@ -2012,6 +2049,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                       creationWatermarks: store.creationWatermarks,
                                       windowFrame: savedExpanded ?? restoredExpandedFrame ?? restoredFrame,
                                       expandedWindowFrame: savedExpanded ?? restoredExpandedFrame,
+                                      unfocusedExpandedWindowFrame: savedUnfocusedExpanded ?? restoredUnfocusedExpandedFrame,
                                       collapsedWindowFrame: savedCollapsed ?? restoredCollapsedFrame,
                                       collapseWhenUnfocused: focusCollapseEnabled,
                                       retentionStartedAt: savedRetention))
@@ -2019,6 +2057,13 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func validRestoredExpandedFrame() -> NSRect? {
         guard let saved = restoredExpandedFrame ?? restoredFrame,
+              [saved.x, saved.y, saved.width, saved.height].allSatisfy({ $0.isFinite }),
+              saved.width >= expandedMinimumSize.width, saved.height >= expandedMinimumSize.height else { return nil }
+        let frame = NSRect(x: saved.x, y: saved.y, width: saved.width, height: saved.height)
+        return NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }) ? frame : nil
+    }
+    func validRestoredUnfocusedExpandedFrame() -> NSRect? {
+        guard let saved = restoredUnfocusedExpandedFrame,
               [saved.x, saved.y, saved.width, saved.height].allSatisfy({ $0.isFinite }),
               saved.width >= expandedMinimumSize.width, saved.height >= expandedMinimumSize.height else { return nil }
         let frame = NSRect(x: saved.x, y: saved.y, width: saved.width, height: saved.height)
@@ -2140,6 +2185,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "stepsSurfaceRGB": "#1F1F21",
                                      "collapsedPositionPersistence": "state.json:collapsedWindowFrame",
                                      "expandedPositionPersistence": "state.json:expandedWindowFrame",
+                                     "unfocusedExpandedPositionPersistence": "state.json:unfocusedExpandedWindowFrame",
                                      "completionRetentionTrigger": "completion-time-only-never-focus",
                                      "completedPlanCheck": "centered-green-grow-with-dissolving-material-blur",
                                      "completedPlanLifecycle": "centered-check-to-deadline-countdown-ring",
@@ -2177,6 +2223,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "activeRetentionFraction": activeRetentionFraction,
                 "retentionArmedPlanIDs": Array(retentionStartedAt.keys).sorted(),
                 "expandedWindowFrame": expandedFrame.map { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] } ?? NSNull(),
+                "unfocusedExpandedWindowFrame": unfocusedExpandedFrame.map { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] } ?? NSNull(),
                 "collapsedWindowFrame": collapsedFrame.map { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] } ?? NSNull(),
                 "plans": plans, "binding": "manual-selector", "hostBundle": hostBundle,
                 "dismissed": dismissed, "window": window]
