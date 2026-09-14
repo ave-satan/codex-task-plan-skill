@@ -1119,6 +1119,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var expandedFromIconSource: NSRect?
     var expandedMovedBeyondSource = false
     var applyingPresentationFrame = false
+    var presentationAnimationToken = 0
     let retentionSeconds = max(0.1, Double(ProcessInfo.processInfo.environment["PLAN_COMPANION_RETENTION_SECONDS"] ?? "") ?? 30)
     let collapsedSize = NSSize(width: 52, height: 52)
     let collapsedExpandDelay: TimeInterval = 0.32
@@ -1241,7 +1242,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.panel.performDrag(with: event)
                 return nil
             }
-            if !self.focusCollapseEnabled || NSWorkspace.shared.frontmostApplication?.bundleIdentifier == self.hostBundle,
+            let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            if !self.focusCollapseEnabled || front == self.hostBundle || front == Bundle.main.bundleIdentifier,
                !self.store.collapsed, self.panel.frame.contains(pointer) {
                 self.restoreHostFocusAfterPointerRelease()
             }
@@ -1367,23 +1369,34 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return screen.map { clamped(candidate, to: $0.visibleFrame) } ?? candidate
     }
 
-    func applyPresentationFrame(_ frame: NSRect, animated: Bool) {
+    func applyPresentationFrame(_ frame: NSRect, alpha: CGFloat, animated: Bool) {
+        presentationAnimationToken += 1
+        let token = presentationAnimationToken
         applyingPresentationFrame = true
         if animated {
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.2
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                context.duration = 0.22
+                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 0.8, 0.3, 1)
                 panel.animator().setFrame(frame, display: true)
-            } completionHandler: { [weak self] in self?.applyingPresentationFrame = false }
+                panel.animator().alphaValue = alpha
+            } completionHandler: { [weak self] in
+                guard let self, self.presentationAnimationToken == token else { return }
+                self.applyingPresentationFrame = false
+            }
         } else {
             panel.setFrame(frame, display: true)
-            DispatchQueue.main.async { [weak self] in self?.applyingPresentationFrame = false }
+            panel.alphaValue = alpha
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.presentationAnimationToken == token else { return }
+                self.applyingPresentationFrame = false
+            }
         }
     }
 
     func collapseToIcon(animated: Bool = false) {
         guard store.active != nil else { panel.orderOut(nil); return }
-        if !store.collapsed { expandedFrame = panel.frame }
+        guard !store.collapsed else { panel.orderFrontRegardless(); return }
+        if !applyingPresentationFrame { expandedFrame = panel.frame }
         let target = collapsedFrame ?? defaultCollapsedFrame()
         collapsedFrame = target
         expandedFromIconSource = nil
@@ -1396,15 +1409,25 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hostView.resizeEnabled = false
         hostView.windowDragEnabled = true
         panel.minSize = collapsedSize
-        panel.alphaValue = 0.82
         panel.orderFrontRegardless()
-        applyPresentationFrame(target, animated: animated)
+        applyPresentationFrame(target, alpha: 0.82, animated: animated)
         try? persist()
         journal("collapsed")
     }
 
     func expandForHost(animated: Bool = true) {
         guard store.active != nil else { panel.orderOut(nil); return }
+        guard store.collapsed else {
+            expandedFromIconSource = nil
+            expandedMovedBeyondSource = false
+            expandedHoverExitStartedAt = nil
+            hostView.resizeEnabled = true
+            hostView.windowDragEnabled = false
+            panel.minSize = NSSize(width: 280, height: 240)
+            panel.alphaValue = 1
+            panel.orderFrontRegardless()
+            return
+        }
         let source = store.collapsed ? panel.frame : nil
         store.collapsed = false
         store.collapsedHovered = false
@@ -1415,9 +1438,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hostView.resizeEnabled = true
         hostView.windowDragEnabled = false
         panel.minSize = NSSize(width: 280, height: 240)
-        panel.alphaValue = 1
         panel.orderFrontRegardless()
-        applyPresentationFrame(fittedExpandedFrame(near: source), animated: animated && source != nil)
+        applyPresentationFrame(fittedExpandedFrame(near: source), alpha: 1, animated: animated && source != nil)
         try? persist()
         journal("expanded_host")
     }
@@ -1432,12 +1454,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         expandedFromIconSource = source
         expandedMovedBeyondSource = false
         expandedHoverExitStartedAt = nil
-        hostView.resizeEnabled = true
+        hostView.resizeEnabled = false
         hostView.windowDragEnabled = false
         panel.minSize = NSSize(width: 280, height: 240)
-        panel.alphaValue = 1
         panel.orderFrontRegardless()
-        applyPresentationFrame(fittedExpandedFrame(near: source), animated: true)
+        applyPresentationFrame(fittedExpandedFrame(near: source), alpha: 1, animated: true)
         armTerminalRetention()
         try? persist()
         journal("expanded_hover")
@@ -1463,20 +1484,25 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if visible != lastVisibility { lastVisibility = visible; journal("visibility") }
             return
         }
-        if front == hostBundle || hostDidActivate {
+        let companion = Bundle.main.bundleIdentifier
+        if front == hostBundle {
             if hostDidActivate { armTerminalRetention() }
             expandForHost(animated: store.collapsed)
         } else if expandedFromIconSource != nil {
+            hostView.resizeEnabled = false
+            panel.orderFrontRegardless()
+        } else if front == companion, !store.collapsed {
             panel.orderFrontRegardless()
         } else {
-            collapseToIcon(animated: false)
+            collapseToIcon(animated: true)
         }
         let visible = panel.isVisible
         if visible != lastVisibility { lastVisibility = visible; journal("visibility") }
     }
 
     func syncCollapsedHover() {
-        guard focusCollapseEnabled, store.collapsed, panel.isVisible, store.active != nil else {
+        guard focusCollapseEnabled, store.collapsed, !applyingPresentationFrame,
+              panel.isVisible, store.active != nil else {
             if store.collapsedHovered { store.collapsedHovered = false }
             collapsedHoverStartedAt = nil
             return
@@ -1498,7 +1524,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func syncExpandedHoverExit() {
-        guard focusCollapseEnabled, !store.collapsed, expandedFromIconSource != nil,
+        guard focusCollapseEnabled, !store.collapsed, !applyingPresentationFrame,
+              expandedFromIconSource != nil,
               NSWorkspace.shared.frontmostApplication?.bundleIdentifier != hostBundle else {
             expandedHoverExitStartedAt = nil
             return
@@ -1514,7 +1541,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func liveResizeCursorKind(at point: NSPoint) -> String? {
-        guard panel?.isVisible == true, !store.collapsed else { return nil }
+        guard panel?.isVisible == true, !store.collapsed, hostView.resizeEnabled else { return nil }
         let frame = panel.frame
         let edge: CGFloat = 18
         let corner: CGFloat = 18
@@ -1536,7 +1563,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return nil
     }
     func syncLiveResizeCursor() {
-        if store.collapsed {
+        if store.collapsed || !hostView.resizeEnabled {
             if liveCursorKind != nil || suppressingFallbackResizeCursor {
                 liveCursorKind = nil
                 suppressingFallbackResizeCursor = false
@@ -1709,7 +1736,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "activationStyle": "nonactivating-panel",
                                      "canBecomeKey": panel?.canBecomeKey ?? true,
                                      "clickKeepsVisible": true,
-                                     "resizable": true,
+                                     "resizable": hostView?.resizeEnabled ?? false,
                                      "nativeResizableStyleMask": panel?.styleMask.contains(.resizable) ?? false,
                                      "resizeImplementation": "custom-content-edge",
                                      "closable": panel?.styleMask.contains(.closable) ?? false,
@@ -1794,6 +1821,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "completedPlanRetentionSeconds": retentionSeconds,
                                      "focusCollapseEnabled": focusCollapseEnabled,
                                      "presentation": store.collapsed ? "collapsed" : "expanded",
+                                     "presentationTransitioning": applyingPresentationFrame,
+                                     "alpha": panel?.alphaValue ?? 0,
                                      "collapsedHovered": store.collapsedHovered,
                                      "collapsedExpandDelay": collapsedExpandDelay,
                                      "collapsedOpacity": 0.82,

@@ -35,11 +35,29 @@ async function runSwift(source) {
   assert.equal(code, 0, stderr);
 }
 
-async function activate(bundle) {
+async function activate(bundle, settleMicroseconds = 650000) {
   await runSwift(`
 import AppKit
 import Darwin
 NSRunningApplication.runningApplications(withBundleIdentifier: "${bundle}").first?.activate()
+usleep(${settleMicroseconds})
+`);
+}
+
+async function rapidFocusSequence() {
+  await runSwift(`
+import AppKit
+import Darwin
+func activate(_ bundle: String) {
+  NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first?.activate()
+}
+activate("${awayBundle}")
+usleep(50000)
+activate("${hostBundle}")
+usleep(50000)
+activate("${awayBundle}")
+usleep(50000)
+activate("${hostBundle}")
 usleep(650000)
 `);
 }
@@ -123,6 +141,7 @@ try {
       && Math.abs(state.window.width - 360) < 0.5 && state;
   }, 'expanded host window');
   assert.equal(expanded.window.width, 360);
+  assert.equal(expanded.window.resizable, true);
   const expandedDragStart = {
     x: expanded.window.x + 120,
     y: expanded.window.y + expanded.window.height - 24,
@@ -134,7 +153,11 @@ try {
   }, 'draggable expanded window');
   await movePointer({ x: 100, y: 100 });
 
-  await activate(awayBundle);
+  await activate(awayBundle, 60000);
+  const collapsing = (await sendCompanion(socket, { action: 'status' })).state;
+  assert.equal(collapsing.window.presentation, 'collapsed');
+  assert.equal(collapsing.window.presentationTransitioning, true);
+  assert.ok(collapsing.window.width > 52, 'focus loss must visibly animate instead of snapping');
   const collapsed = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
     return state.visible && state.window.presentation === 'collapsed'
@@ -142,6 +165,7 @@ try {
   }, 'collapsed icon');
   assert.equal(collapsed.window.width, 52);
   assert.equal(collapsed.window.height, 52);
+  assert.equal(collapsed.window.presentationTransitioning, false);
 
   const center = { x: collapsed.window.x + 26, y: collapsed.window.y + 26 };
   await drag(center, { x: center.x + 70, y: center.y + 20 });
@@ -153,7 +177,21 @@ try {
   await movePointer({ x: 100, y: 100 });
 
   await activate(hostBundle);
-  await eventually(async () => (await sendCompanion(socket, { action: 'status' })).state.window.presentation === 'expanded', 'host re-expansion');
+  await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.window.presentation === 'expanded' && state.window.resizable && state;
+  }, 'host re-expansion');
+  await activate('local.taskplan.companion.prototype', 120000);
+  const companionFocused = (await sendCompanion(socket, { action: 'status' })).state;
+  assert.equal(companionFocused.window.presentation, 'expanded', 'companion self-focus must not collapse the host window');
+  await rapidFocusSequence();
+  const rapidStable = await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.frontmostBundle === hostBundle && state.window.presentation === 'expanded'
+      && !state.window.presentationTransitioning && Math.abs(state.window.width - 360) < 0.5 && state;
+  }, 'stable rapid focus transitions');
+  assert.equal(rapidStable.expandedWindowFrame.width, 360, 'interrupted animations must not corrupt the saved expanded frame');
+  await movePointer({ x: 100, y: 100 });
   await activate(awayBundle);
   const collapsedAgain = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
@@ -184,6 +222,8 @@ try {
   }, 'hover expansion');
   assert.ok(hoverExpanded.retentionArmedPlanIDs.includes('plan-1'));
   assert.equal(hoverExpanded.activeStatus, 'completed');
+  assert.equal(hoverExpanded.window.resizable, false, 'hover-expanded unfocused window must not resize');
+  assert.equal((await sendCompanion(socket, { action: 'cursor_probe', x: 1, y: 1 })).kind, 'arrow');
 
   await sendCompanion(socket, { action: 'remove', id: 'plan-1' });
   await sendCompanion(socket, { action: 'remove', id: 'plan-2' });
