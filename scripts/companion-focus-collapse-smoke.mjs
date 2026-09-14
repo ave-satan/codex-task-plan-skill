@@ -296,7 +296,8 @@ try {
   }});
   const completed = (await sendCompanion(socket, { action: 'status' })).state;
   assert.equal(completed.selected, 'plan-1', 'newly completed plan must become active');
-  assert.deepEqual(completed.retentionArmedPlanIDs, [], 'completion while collapsed must not start retention');
+  assert.ok(completed.activeRetentionFraction > 0,
+    'completion must start retention immediately even while collapsed');
   await sendCompanion(socket, { action: 'snapshot', name: 'completed-check-start' });
   await delay(650);
   await sendCompanion(socket, { action: 'snapshot', name: 'completed-check-settled' });
@@ -312,7 +313,8 @@ try {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
     return state.window.presentation === 'expanded' && state;
   }, 'hover expansion');
-  assert.ok(hoverExpanded.retentionArmedPlanIDs.includes('plan-1'));
+  assert.ok(hoverExpanded.activeRetentionFraction < completed.activeRetentionFraction,
+    'focus and hover must not restart the completion deadline');
   assert.equal(hoverExpanded.activeStatus, 'completed');
   assert.equal(hoverExpanded.window.resizable, false, 'hover-expanded unfocused window must not resize');
   const hoverSourceCenter = {

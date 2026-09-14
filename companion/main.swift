@@ -86,6 +86,8 @@ private enum PanelMetrics {
     static let planHoverExitGrace: TimeInterval = 0.18
 }
 
+private let completionCheckDuration: TimeInterval = 1.35
+
 private func parseISODate(_ value: String?) -> Date? {
     guard let value else { return nil }
     let fractional = ISO8601DateFormatter()
@@ -665,13 +667,6 @@ struct PlanEmojiCircle: View {
     }
 }
 
-final class CompletionLifecycleAnimation: ObservableObject {
-    @Published var checkScale: CGFloat = 1
-    @Published var checkOpacity = 1.0
-    @Published var blurOpacity = 0.94
-    @Published var ringVisible = false
-}
-
 struct PlanCompletionLifecycle: View {
     var animationKey: String
     var completedAt: Date?
@@ -679,44 +674,57 @@ struct PlanCompletionLifecycle: View {
     var deadline: Date?
     var retentionDuration: TimeInterval
     var hovered: Bool
-    @StateObject private var animation = CompletionLifecycleAnimation()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        ZStack {
-            if animation.ringVisible {
-                TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
+            let age = reduceMotion ? completionCheckDuration : elapsed(at: context.date)
+            ZStack {
+                if age >= completionCheckDuration {
+                    let fraction = remainingFraction(at: context.date)
                     Circle()
-                        .trim(from: 0, to: remainingFraction(at: context.date))
+                        .trim(from: 1 - fraction, to: 1)
                         .stroke(CodexPalette.primary.opacity(0.42),
                                 style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
                         .rotationEffect(.degrees(-90))
+                    Circle()
+                        .fill(.regularMaterial)
+                        .opacity(hovered ? 0.94 : 0)
+                        .blur(radius: hovered ? 2.2 : 0)
+                    Image(systemName: "xmark")
+                        .font(.system(size: diameter * 0.34, weight: .semibold))
+                        .foregroundStyle(CodexPalette.primary)
+                        .opacity(hovered ? 1 : 0)
+                        .scaleEffect(hovered ? 1 : 0.72)
+                } else {
+                    let grow = eased(min(1, age / 0.48))
+                    let blurOpacity = 0.94 * (1 - grow)
+                    let fadeStart = completionCheckDuration - 0.18
+                    let checkOpacity = age <= fadeStart ? 1 : max(0, 1 - (age - fadeStart) / 0.18)
+                    Circle()
+                        .fill(.regularMaterial)
+                        .opacity(blurOpacity)
+                        .blur(radius: blurOpacity * 3)
+                    Image(systemName: "checkmark")
+                        .font(.system(size: diameter * 0.48, weight: .heavy))
+                        .foregroundStyle(CodexPalette.statusGreen)
+                        .scaleEffect(1 + 0.34 * grow)
+                        .opacity(checkOpacity)
                 }
-                Circle()
-                    .fill(.regularMaterial)
-                    .opacity(hovered ? 0.94 : 0)
-                    .blur(radius: hovered ? 2.2 : 0)
-                Image(systemName: "xmark")
-                    .font(.system(size: diameter * 0.34, weight: .semibold))
-                    .foregroundStyle(CodexPalette.primary)
-                    .opacity(hovered ? 1 : 0)
-                    .scaleEffect(hovered ? 1 : 0.72)
-            } else {
-                Circle()
-                    .fill(.regularMaterial)
-                    .opacity(animation.blurOpacity)
-                    .blur(radius: animation.blurOpacity * 3)
-                Image(systemName: "checkmark")
-                    .font(.system(size: diameter * 0.48, weight: .heavy))
-                    .foregroundStyle(CodexPalette.statusGreen)
-                    .scaleEffect(animation.checkScale)
-                    .opacity(animation.checkOpacity)
             }
         }
         .frame(width: diameter, height: diameter)
         .id(animationKey)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovered)
-        .onAppear(perform: startSequence)
+    }
+
+    private func elapsed(at now: Date) -> TimeInterval {
+        guard let completedAt else { return completionCheckDuration }
+        return max(0, now.timeIntervalSince(completedAt))
+    }
+
+    private func eased(_ value: TimeInterval) -> CGFloat {
+        CGFloat(1 - pow(1 - value, 3))
     }
 
     private func remainingFraction(at now: Date) -> CGFloat {
@@ -724,24 +732,6 @@ struct PlanCompletionLifecycle: View {
         return CGFloat(max(0, min(1, deadline.timeIntervalSince(now) / max(0.1, retentionDuration))))
     }
 
-    private func startSequence() {
-        if reduceMotion || completedAt.map({ Date().timeIntervalSince($0) > 0.8 }) == true {
-            animation.checkOpacity = 0
-            animation.blurOpacity = 0
-            animation.ringVisible = true
-            return
-        }
-        withAnimation(.easeOut(duration: 0.42)) {
-            animation.checkScale = 1.34
-            animation.blurOpacity = 0
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.46) {
-            withAnimation(.easeOut(duration: 0.16)) { animation.checkOpacity = 0 }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.62) {
-            animation.ringVisible = true
-        }
-    }
 }
 
 struct CollapsedPlanView: View {
@@ -1279,21 +1269,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func expiryDate(_ plan: Plan) -> Date? {
-        guard terminalDate(plan) != nil else { return nil }
-        if focusCollapseEnabled {
-            return retentionStartedAt[plan.id]?.addingTimeInterval(retentionSeconds)
-        }
         return terminalDate(plan)?.addingTimeInterval(retentionSeconds)
-    }
-
-    @discardableResult func armTerminalRetention(at now: Date = Date()) -> Bool {
-        var changed = false
-        for plan in store.plans where terminalDate(plan) != nil && retentionStartedAt[plan.id] == nil {
-            retentionStartedAt[plan.id] = now
-            changed = true
-        }
-        if changed { scheduleExpiry(); try? persist(); journal("retention_armed") }
-        return changed
     }
 
     @discardableResult func pruneExpiredPlans(at now: Date = Date()) -> Bool {
@@ -1542,7 +1518,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @discardableResult func removeCompletedPlanIfReady(_ id: String) -> Bool {
         guard let plan = store.plans.first(where: { $0.id == id }), plan.status == "completed" else { return false }
         if let completedAt = plan.completedAt.flatMap(parseISODate),
-           Date().timeIntervalSince(completedAt) < 0.62 { return false }
+           Date().timeIntervalSince(completedAt) < completionCheckDuration { return false }
         removePlan(id, event: "plan_removed_by_user")
         return true
     }
@@ -1755,7 +1731,6 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hostView.windowDragEnabled = false
         panel.minSize = collapsedSize
         panel.orderFrontRegardless()
-        armTerminalRetention()
         try? persist()
         journal("expanded_hover")
     }
@@ -1787,7 +1762,6 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let companion = Bundle.main.bundleIdentifier
         if front == hostBundle {
-            if hostDidActivate { armTerminalRetention() }
             expandForHost(animated: store.collapsed)
         } else if expandedFromIconSource != nil {
             hostView.resizeEnabled = false
@@ -2164,10 +2138,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "stepsSurfaceRGB": "#1F1F21",
                                      "collapsedPositionPersistence": "state.json:collapsedWindowFrame",
                                      "expandedPositionPersistence": "state.json:expandedWindowFrame",
-                                     "completionRetentionTrigger": focusCollapseEnabled ? "host-focus-or-icon-expand" : "completion-time",
+                                     "completionRetentionTrigger": "completion-time-only-never-focus",
                                      "completedPlanCheck": "centered-green-grow-with-dissolving-material-blur",
                                      "completedPlanLifecycle": "centered-check-to-deadline-countdown-ring",
-                                     "completedPlanCountdown": "clockwise-shrinking-ring-matches-collapsed-border",
+                                     "completedPlanCountdown": "reverse-direction-shrinking-ring-matches-collapsed-border",
                                      "completedPlanHoverAction": "blurred-x-immediate-remove",
                                      "windowDragSurface": "all-content-except-resize-and-plan-switcher",
                                      "pendingStepAlignment": "reserved-column",

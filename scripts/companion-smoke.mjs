@@ -139,8 +139,9 @@ try {
   assert.equal(initialWindow.completedPlanRetentionSeconds,30);
   assert.equal(initialWindow.completedPlanCheck,'centered-green-grow-with-dissolving-material-blur');
   assert.equal(initialWindow.completedPlanLifecycle,'centered-check-to-deadline-countdown-ring');
-  assert.equal(initialWindow.completedPlanCountdown,'clockwise-shrinking-ring-matches-collapsed-border');
+  assert.equal(initialWindow.completedPlanCountdown,'reverse-direction-shrinking-ring-matches-collapsed-border');
   assert.equal(initialWindow.completedPlanHoverAction,'blurred-x-immediate-remove');
+  assert.equal(initialWindow.completionRetentionTrigger,'completion-time-only-never-focus');
   assert.equal(initialWindow.pendingStepAlignment,'reserved-column');
   assert.equal(initialWindow.noteAnimation,'blur-fade-rise-on-insert-and-change');
   assert.equal(initialWindow.noteTopSpacing,3);
