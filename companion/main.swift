@@ -133,6 +133,10 @@ struct Command: Decodable {
     var height: Double?
     var enabled: Bool?
 }
+struct HostWindowObservation {
+    var id: Int
+    var frame: NSRect
+}
 
 // All state transitions run on the AppKit main queue, including IPC updates.
 final class Store: ObservableObject {
@@ -1228,7 +1232,6 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var hostView: PanelHostingView<CompanionRootView>!
     var observers: [NSObjectProtocol] = []
     var localEventMonitor: Any?
-    var globalGestureMonitor: Any?
     var dismissed = false
     var listener: Int32 = -1
     var instanceLock: Int32 = -1
@@ -1267,6 +1270,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var workspaceGestureGeneration = 0
     var lastEarlyPresentationSignal: String?
     var lastEarlyPresentationSignalAt: Date?
+    var hostWindowObservationInitialized = false
+    var lastHostWindowObservation: HostWindowObservation?
+    var lastHostWindowPollAt = Date.distantPast
+    var earlyHostDepartureBaseline: HostWindowObservation?
+    var earlyHostDepartureReturnSamples = 0
     let retentionSeconds = max(0.1, Double(ProcessInfo.processInfo.environment["PLAN_COMPANION_RETENTION_SECONDS"] ?? "") ?? 30)
     let collapsedSize = NSSize(width: 52, height: 52)
     let expandedMinimumSize = NSSize(width: PanelMetrics.minimumWidth, height: PanelMetrics.minimumHeight)
@@ -1373,6 +1381,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.syncPlanSwitcherHover()
             self?.syncCollapsedHover()
             self?.syncExpandedHoverExit()
+            self?.syncWorkspaceWindowMotion()
         }
         cursorTimer?.tolerance = 1.0 / 120
         localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
@@ -1386,7 +1395,6 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     return nil
                 }
                 self.store.select(selected)
-                self.restoreHostFocusAfterPointerRelease()
                 return nil
             }
             if self.activePlanIconContains(pointer), let selected = self.store.selected,
@@ -1422,12 +1430,6 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.restoreHostFocusAfterPointerRelease()
             }
             return event
-        }
-        globalGestureMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.swipe]) { [weak self] event in
-            guard abs(event.deltaX) > abs(event.deltaY), abs(event.deltaX) > 0.01 else { return }
-            DispatchQueue.main.async {
-                self?.beginEarlyPresentationTransition(source: "horizontal-swipe")
-            }
         }
         store.changed = { [weak self] in self?.stateChanged() }
         store.removeRequested = { [weak self] id in
@@ -1845,20 +1847,103 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == hostBundle else { return }
         }
         workspaceGestureGeneration += 1
-        let generation = workspaceGestureGeneration
         lastEarlyPresentationSignal = source
         lastEarlyPresentationSignalAt = Date()
         collapseToIcon(animated: true)
         journal("early_presentation_transition")
+    }
 
-        // A global swipe can also belong to an app-level gesture. If no Space or
-        // focus transition follows, restore the host presentation after a short grace.
-        guard source == "horizontal-swipe" else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+    func primaryHostWindowObservation() -> HostWindowObservation? {
+        guard let hostPID = NSRunningApplication.runningApplications(withBundleIdentifier: hostBundle)
+                .first?.processIdentifier,
+              let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                    kCGNullWindowID) as? [[String: Any]] else { return nil }
+        return rows.compactMap { row -> HostWindowObservation? in
+            guard (row[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == hostPID,
+                  (row[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                  let dictionary = row[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: dictionary),
+                  frame.width >= 240, frame.height >= 160 else { return nil }
+            return HostWindowObservation(id: (row[kCGWindowNumber as String] as? NSNumber)?.intValue ?? -1,
+                                         frame: frame)
+        }.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
+    }
+
+    func beginEarlyHostArrival() {
+        guard focusCollapseEnabled, store.active != nil, store.collapsed, !dismissed else { return }
+        workspaceGestureGeneration += 1
+        let generation = workspaceGestureGeneration
+        lastEarlyPresentationSignal = "host-window-motion-arriving"
+        lastEarlyPresentationSignalAt = Date()
+        expandForHost(animated: true)
+        journal("early_host_arrival")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             guard let self, self.workspaceGestureGeneration == generation,
-                  NSWorkspace.shared.frontmostApplication?.bundleIdentifier == self.hostBundle else { return }
-            self.expandForHost(animated: true)
-            self.journal("early_presentation_transition_recovered")
+                  NSWorkspace.shared.frontmostApplication?.bundleIdentifier != self.hostBundle else { return }
+            self.collapseToIcon(animated: true)
+            self.journal("early_host_arrival_recovered")
+        }
+    }
+
+    func hostWindowReturnedToDepartureBaseline(_ current: HostWindowObservation?) -> Bool {
+        guard let baseline = earlyHostDepartureBaseline, let current,
+              baseline.id == current.id else {
+            earlyHostDepartureReturnSamples = 0
+            return false
+        }
+        let returned = abs(current.frame.minX - baseline.frame.minX) <= 4
+            && abs(current.frame.minY - baseline.frame.minY) <= 4
+        earlyHostDepartureReturnSamples = returned ? earlyHostDepartureReturnSamples + 1 : 0
+        return earlyHostDepartureReturnSamples >= 2
+    }
+
+    func syncWorkspaceWindowMotion() {
+        guard panel != nil, focusCollapseEnabled, store.active != nil, !dismissed else {
+            hostWindowObservationInitialized = false
+            lastHostWindowObservation = nil
+            earlyHostDepartureBaseline = nil
+            earlyHostDepartureReturnSamples = 0
+            return
+        }
+        let now = Date()
+        guard now.timeIntervalSince(lastHostWindowPollAt) >= 1.0 / 30.0 else { return }
+        lastHostWindowPollAt = now
+        let current = primaryHostWindowObservation()
+        guard hostWindowObservationInitialized else {
+            hostWindowObservationInitialized = true
+            lastHostWindowObservation = current
+            return
+        }
+        defer { lastHostWindowObservation = current }
+        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        if front == hostBundle, !store.collapsed, !collapsingToIcon,
+           NSEvent.pressedMouseButtons & 1 == 0,
+           let previous = lastHostWindowObservation, let current,
+           previous.id == current.id {
+            let deltaX = current.frame.minX - previous.frame.minX
+            let deltaY = current.frame.minY - previous.frame.minY
+            if abs(deltaX) >= 8, abs(deltaX) > abs(deltaY) * 2 {
+                earlyHostDepartureBaseline = previous
+                earlyHostDepartureReturnSamples = 0
+                beginEarlyPresentationTransition(source: "host-window-motion-leaving")
+            }
+        } else if front == hostBundle, store.collapsed,
+                  lastEarlyPresentationSignal == "host-window-motion-leaving",
+                  hostWindowReturnedToDepartureBaseline(current) {
+            workspaceGestureGeneration += 1
+            earlyHostDepartureBaseline = nil
+            earlyHostDepartureReturnSamples = 0
+            expandForHost(animated: true)
+            journal("early_host_departure_recovered")
+        } else if front != hostBundle, store.collapsed,
+                  lastHostWindowObservation == nil, current != nil {
+            beginEarlyHostArrival()
+        } else if front != hostBundle, !store.collapsed,
+                  lastEarlyPresentationSignal == "host-window-motion-arriving",
+                  lastHostWindowObservation != nil, current == nil {
+            workspaceGestureGeneration += 1
+            collapseToIcon(animated: true)
+            journal("early_host_arrival_recovered")
         }
     }
 
@@ -2269,7 +2354,13 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "completedPlanRetentionSeconds": retentionSeconds,
                                      "focusCollapseEnabled": focusCollapseEnabled,
                                      "hostLifecycle": "workspace-termination-observer-with-750ms-running-app-fallback",
-                                     "workspaceTransitionStart": "host-deactivation-or-horizontal-swipe-with-space-change-fallback",
+                                     "workspaceTransitionStart": "window-server-motion-with-workspace-notification-fallback",
+                                     "workspaceWindowMotionPollingHz": 30,
+                                     "hostWindowObservationInitialized": hostWindowObservationInitialized,
+                                     "hostWindowObservation": lastHostWindowObservation.map {
+                                        ["id": $0.id, "x": $0.frame.minX, "y": $0.frame.minY,
+                                         "width": $0.frame.width, "height": $0.frame.height]
+                                     } ?? NSNull(),
                                      "lastEarlyPresentationSignal": lastEarlyPresentationSignal ?? NSNull(),
                                      "lastEarlyPresentationSignalAt": lastEarlyPresentationSignalAt.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull(),
                                      "presentation": collapsingToIcon ? "collapsing" : (store.collapsed ? "collapsed" : "expanded"),
@@ -2400,7 +2491,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     && store.selected.map(removeCompletedPlanIfReady) == true
                 return ["ok": true, "removed": removed, "state": snapshot()]
             case "workspace_transition_probe":
-                beginEarlyPresentationTransition(source: "horizontal-swipe")
+                if command.name == "arriving" {
+                    beginEarlyHostArrival()
+                } else {
+                    beginEarlyPresentationTransition(source: "host-window-motion-leaving")
+                }
+                return ["ok": true, "state": snapshot()]
             case "status": break
             case "snapshot":
                 guard let name = command.name, name.range(of: "^[a-zA-Z0-9_-]{1,60}$", options: .regularExpression) != nil else { throw NSError(domain: "Invalid snapshot name", code: 5) }
@@ -2485,7 +2581,6 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         journal("stopped")
         for observer in observers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
-        if let globalGestureMonitor { NSEvent.removeMonitor(globalGestureMonitor) }
         if let localEventMonitor { NSEvent.removeMonitor(localEventMonitor) }
         if listener >= 0 { Darwin.close(listener); unlink(socketPath) }
         if instanceLock >= 0 { Darwin.close(instanceLock) }

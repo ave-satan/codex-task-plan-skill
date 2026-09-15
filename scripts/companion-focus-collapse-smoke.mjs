@@ -64,10 +64,26 @@ async function buildFocusApp(name, bundle) {
   await writeFile(source, `import AppKit
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
-let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 180, height: 120),
+let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 320, height: 240),
   styleMask: [.titled], backing: .buffered, defer: false)
 window.title = "${name}"
 window.makeKeyAndOrderFront(nil)
+let moveURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.move`)}")
+let cancelURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.cancel-move`)}")
+var moveDeltas: [CGFloat] = []
+Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { _ in
+  if FileManager.default.fileExists(atPath: moveURL.path) {
+    try? FileManager.default.removeItem(at: moveURL)
+    moveDeltas = Array(repeating: 15, count: 8)
+  }
+  if FileManager.default.fileExists(atPath: cancelURL.path) {
+    try? FileManager.default.removeItem(at: cancelURL)
+    moveDeltas = Array(repeating: 15, count: 8) + Array(repeating: -15, count: 8)
+  }
+  if !moveDeltas.isEmpty {
+    window.setFrameOrigin(NSPoint(x: window.frame.minX + moveDeltas.removeFirst(), y: window.frame.minY))
+  }
+}
 app.run()
 `);
   await run('/usr/bin/swiftc', [
@@ -90,6 +106,11 @@ import Darwin
 NSRunningApplication.runningApplications(withBundleIdentifier: "${bundle}").first?.activate()
 usleep(${settleMicroseconds})
 `);
+}
+
+async function moveFixtureWindow(bundle, cancelled = false) {
+  await writeFile(join(fixture, `${bundle}.${cancelled ? 'cancel-move' : 'move'}`), '1');
+  await delay(25);
 }
 
 async function rapidFocusSequence() {
@@ -217,6 +238,14 @@ try {
   }, 'initial collapsed fixture');
   assert.equal(initiallyCollapsed.expandedWindowFrame.width, 360);
 
+  const arriving = (await sendCompanion(socket, {
+    action: 'workspace_transition_probe', name: 'arriving',
+  })).state;
+  assert.equal(arriving.window.presentation, 'expanded');
+  assert.equal(arriving.window.presentationTransitioning, true,
+    'WindowServer arrival motion must start expansion before host activation completes');
+  assert.equal(arriving.window.lastEarlyPresentationSignal, 'host-window-motion-arriving');
+
   await activate(hostBundle);
   const expanded = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
@@ -236,13 +265,34 @@ try {
   }, 'draggable expanded window');
   await movePointer({ x: 100, y: 100 });
 
-  const earlyTransition = (await sendCompanion(socket, { action: 'workspace_transition_probe' })).state;
+  if (useFixtureApps) {
+    await moveFixtureWindow(hostBundle, true);
+    await eventually(async () => {
+      const state = (await sendCompanion(socket, { action: 'status' })).state;
+      return state.window.lastEarlyPresentationSignal === 'host-window-motion-leaving'
+        && state.window.presentationTransitioning && state;
+    }, 'cancelled WindowServer motion starts collapse');
+    const recovered = await eventually(async () => {
+      const state = (await sendCompanion(socket, { action: 'status' })).state;
+      return state.frontmostBundle === hostBundle && state.window.presentation === 'expanded'
+        && !state.window.presentationTransitioning && state;
+    }, 'cancelled WindowServer motion restores expanded host plan');
+    assert.equal(recovered.window.resizable, true);
+  }
+
+  if (useFixtureApps) await moveFixtureWindow(hostBundle);
+  else await sendCompanion(socket, { action: 'workspace_transition_probe' });
+  const earlyTransition = await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.window.presentation === 'collapsing' && state;
+  }, 'WindowServer host-window motion starts collapse');
   assert.equal(earlyTransition.window.presentation, 'collapsing',
     'a workspace-start signal must begin the morph before focus or active-Space completion changes');
   assert.equal(earlyTransition.window.presentationTransitioning, true);
-  assert.equal(earlyTransition.window.lastEarlyPresentationSignal, 'horizontal-swipe');
+  assert.equal(earlyTransition.window.lastEarlyPresentationSignal, 'host-window-motion-leaving');
   assert.equal(earlyTransition.window.workspaceTransitionStart,
-    'host-deactivation-or-horizontal-swipe-with-space-change-fallback');
+    'window-server-motion-with-workspace-notification-fallback');
+  assert.equal(earlyTransition.window.workspaceWindowMotionPollingHz, 30);
 
   await activate(awayBundle, 60000);
   const collapsing = (await sendCompanion(socket, { action: 'status' })).state;
@@ -370,6 +420,23 @@ try {
   assert.equal(hoverExpanded.window.collapsedBorder, '1pt-white-17pct');
   assert.equal(hoverExpanded.window.stepsSurfaceRGB, '#1F1F21');
   assert.equal((await sendCompanion(socket, { action: 'cursor_probe', x: 1, y: 1 })).kind, 'arrow');
+
+  const activeIcon = {
+    x: hoverExpanded.window.x + 24,
+    y: hoverExpanded.window.y + hoverExpanded.window.height - 24,
+  };
+  await hover(activeIcon);
+  await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.planSwitcherExpanded && state;
+  }, 'unfocused plan selector expansion');
+  await click({ x: activeIcon.x + 28, y: activeIcon.y });
+  const switchedUnfocused = await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.selected === 'plan-2' && !state.planSwitcherExpanded && state;
+  }, 'unfocused plan selection');
+  assert.equal(switchedUnfocused.frontmostBundle, awayBundle,
+    'selecting another plan must not activate the host application');
 
   const focusedFrameBefore = hoverExpanded.expandedWindowFrame;
   const unfocusedDragStart = {
