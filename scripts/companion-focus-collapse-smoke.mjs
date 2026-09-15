@@ -293,6 +293,15 @@ try {
   assert.equal(earlyTransition.window.workspaceTransitionStart,
     'window-server-motion-with-workspace-notification-fallback');
   assert.equal(earlyTransition.window.workspaceWindowMotionPollingHz, 30);
+  assert.equal(earlyTransition.window.presentationAnimationDriver,
+    'common-runloop-direct-window-frames-60fps');
+  assert.equal(earlyTransition.window.presentationTweenActive, true);
+
+  const earlyWidth = earlyTransition.window.width;
+  await delay(35);
+  const laterTransition = (await sendCompanion(socket, { action: 'status' })).state;
+  assert.ok(laterTransition.window.width < earlyWidth,
+    'direct frame tween must present another smaller window frame while collapse is running');
 
   await activate(awayBundle, 60000);
   const collapsing = (await sendCompanion(socket, { action: 'status' })).state;

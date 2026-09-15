@@ -137,6 +137,16 @@ struct HostWindowObservation {
     var id: Int
     var frame: NSRect
 }
+struct PresentationTween {
+    var token: Int
+    var fromFrame: NSRect
+    var toFrame: NSRect
+    var fromAlpha: CGFloat
+    var toAlpha: CGFloat
+    var startedAt: TimeInterval
+    var duration: TimeInterval
+    var completion: (() -> Void)?
+}
 
 // All state transitions run on the AppKit main queue, including IPC updates.
 final class Store: ObservableObject {
@@ -1266,6 +1276,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var hostPresenceObserved = false
     var hostMissingStartedAt: Date?
     var presentationAnimationToken = 0
+    var presentationTween: PresentationTween?
     var pendingPresentationSync = false
     var workspaceGestureGeneration = 0
     var lastEarlyPresentationSignal: String?
@@ -1375,7 +1386,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         panel.contentView = hostView
         panel.enableCursorRects()
-        cursorTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+        cursorTimer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+            self?.syncPresentationAnimation()
             self?.syncHostLifecycle()
             self?.syncLiveResizeCursor()
             self?.syncPlanSwitcherHover()
@@ -1384,6 +1396,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.syncWorkspaceWindowMotion()
         }
         cursorTimer?.tolerance = 1.0 / 120
+        if let cursorTimer { RunLoop.main.add(cursorTimer, forMode: .common) }
         localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
             guard let self else { return event }
             let pointer = NSEvent.mouseLocation
@@ -1661,19 +1674,21 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let token = presentationAnimationToken
         applyingPresentationFrame = true
         if animated {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.22
-                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 0.8, 0.3, 1)
-                panel.animator().setFrame(frame, display: true)
-                panel.animator().alphaValue = alpha
-            } completionHandler: { [weak self] in
-                guard let self, self.presentationAnimationToken == token else { return }
-                self.panel.setFrame(frame, display: true)
-                self.panel.alphaValue = alpha
-                self.applyingPresentationFrame = false
-                completion?()
-            }
+            hostView.layoutSubtreeIfNeeded()
+            panel.contentView?.displayIfNeeded()
+            presentationTween = PresentationTween(
+                token: token,
+                fromFrame: panel.frame,
+                toFrame: frame,
+                fromAlpha: panel.alphaValue,
+                toAlpha: alpha,
+                startedAt: ProcessInfo.processInfo.systemUptime,
+                duration: 0.22,
+                completion: completion
+            )
+            syncPresentationAnimation()
         } else {
+            presentationTween = nil
             panel.setFrame(frame, display: true)
             panel.alphaValue = alpha
             DispatchQueue.main.async { [weak self] in
@@ -1682,6 +1697,33 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 completion?()
             }
         }
+    }
+
+    func syncPresentationAnimation() {
+        guard let tween = presentationTween else { return }
+        guard tween.token == presentationAnimationToken else {
+            presentationTween = nil
+            return
+        }
+        let elapsed = ProcessInfo.processInfo.systemUptime - tween.startedAt
+        let linear = min(1, max(0, elapsed / tween.duration))
+        let eased = CGFloat(1 - pow(1 - linear, 3))
+        func value(_ from: CGFloat, _ to: CGFloat) -> CGFloat {
+            from + (to - from) * eased
+        }
+        let frame = NSRect(
+            x: value(tween.fromFrame.minX, tween.toFrame.minX),
+            y: value(tween.fromFrame.minY, tween.toFrame.minY),
+            width: value(tween.fromFrame.width, tween.toFrame.width),
+            height: value(tween.fromFrame.height, tween.toFrame.height)
+        )
+        panel.setFrame(frame, display: true)
+        panel.alphaValue = value(tween.fromAlpha, tween.toAlpha)
+        panel.displayIfNeeded()
+        guard linear >= 1 else { return }
+        presentationTween = nil
+        applyingPresentationFrame = false
+        tween.completion?()
     }
 
     func schedulePresentationFrame(_ frame: NSRect, alpha: CGFloat, animated: Bool,
@@ -2373,6 +2415,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "collapsedBorder": "1pt-white-17pct",
                                      "collapsedOpacity": 0.82,
                                      "collapseAnimation": "window-morphs-around-stationary-plan-icon",
+                                     "presentationAnimationDriver": "common-runloop-direct-window-frames-60fps",
+                                     "presentationTweenActive": presentationTween != nil,
                                      "collapseVisualSwap": "morphing-window-shell-with-icon-only-content",
                                      "collapsedDragSuppressesExpansion": true,
                                      "panelClickFocusesHost": true,
