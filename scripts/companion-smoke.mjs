@@ -149,6 +149,10 @@ try {
   assert.equal(initialWindow.stepSpacing,0);
   assert.equal(initialWindow.framePersistence,'state.json');
   assert.equal(initialWindow.unfocusedExpandedPositionPersistence,'state.json:unfocusedExpandedWindowFrame');
+  assert.equal(initialWindow.transitionPlanIconGlyphSize,initialWindow.planIconGlyphSize);
+  assert.equal(initialWindow.transitionPlanIconAnchor,'fixed-screen-center');
+  assert.equal(initialWindow.panelClickFocusesHost,true);
+  assert.equal(initialWindow.windowDragPreservesCurrentFocus,true);
   assert.equal(initialWindow.minimumWidth,280);
   const bundledIcons = (await readdir(join(binary,'..','..','Resources','agent-icons'))).filter(name=>name.endsWith('.png'));
   assert.equal(bundledIcons.length,10);

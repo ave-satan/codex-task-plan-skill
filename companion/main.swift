@@ -746,7 +746,8 @@ struct CollapsedPlanView: View {
                 .animation(.spring(response: 0.2, dampingFraction: 0.72), value: store.collapsedHovered)
             if let active = store.active {
                 PlanEmojiCircle(store: store, plan: active, size: 38,
-                                highlighted: store.collapsedHovered, glyphSize: 27)
+                                highlighted: store.collapsedHovered,
+                                glyphSize: PanelMetrics.planIconGlyph)
                     .overlay(alignment: .bottomTrailing) {
                         if store.plans.count > 1 {
                             Text("+\(store.plans.count - 1)")
@@ -809,8 +810,7 @@ struct TransitionPlanView: View {
                     ZStack {
                         PlanEmojiCircle(store: store, plan: active, size: 38,
                                         highlighted: store.collapsedHovered || store.hoveredPlanID == active.id,
-                                        glyphSize: 27)
-                            .scaleEffect(0.67 + 0.33 * compact)
+                                        glyphSize: PanelMetrics.planIconGlyph)
                             .overlay(alignment: .bottomTrailing) {
                                 if store.plans.count > 1 {
                                     Text("+\(store.plans.count - 1)")
@@ -1249,6 +1249,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let planTooltip = PlanTooltipPanel()
     var liveCursorKind: String?
     var suppressingFallbackResizeCursor = false
+    var suppressResizeActivationUntilPointerExit = false
     var planHoverExitStartedAt: Date?
     var collapsedHoverStartedAt: Date?
     var expandedHoverExitStartedAt: Date?
@@ -1376,34 +1377,34 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if let selected = self.planSwitcherSelection(at: pointer) {
                 if self.removeCompletedPlanIfReady(selected) { return nil }
                 self.store.select(selected)
+                self.restoreHostFocusAfterPointerRelease()
                 return nil
             }
             if self.activePlanIconContains(pointer), let selected = self.store.selected,
                self.removeCompletedPlanIfReady(selected) { return nil }
             if self.panel.frame.contains(pointer), self.canBeginWindowDrag(at: pointer) {
                 let wasCollapsed = self.store.collapsed
-                let dragStart = self.panel.frame.origin
                 let activeAtDragStart = self.store.active?.id
                 if wasCollapsed {
                     self.collapsedDragInProgress = true
                     self.store.collapsedHovered = false
                     self.collapsedHoverStartedAt = nil
                 }
-                self.panel.performDrag(with: event)
+                let wasClick = !self.trackWindowDrag(from: event)
                 if wasCollapsed {
                     self.collapsedDragInProgress = false
                     self.collapsedHoverBlockedUntilExit = true
-                    let dx = self.panel.frame.minX - dragStart.x
-                    let dy = self.panel.frame.minY - dragStart.y
-                    if hypot(dx, dy) < 2, let activeAtDragStart {
-                        _ = self.removeCompletedPlanIfReady(activeAtDragStart)
+                    if wasClick, let activeAtDragStart {
+                        if !self.removeCompletedPlanIfReady(activeAtDragStart) {
+                            self.restoreHostFocusAfterPointerRelease()
+                        }
                     }
+                } else if wasClick {
+                    self.restoreHostFocusAfterPointerRelease()
                 }
                 return nil
             }
-            let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-            if !self.focusCollapseEnabled || front == self.hostBundle || front == Bundle.main.bundleIdentifier,
-               !self.store.collapsed, self.panel.frame.contains(pointer) {
+            if self.panel.frame.contains(pointer) {
                 self.restoreHostFocusAfterPointerRelease()
             }
             return event
@@ -1498,6 +1499,23 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let iconStrip = NSRect(x: iconOriginX - 4, y: iconOriginY,
                                width: stripWidth, height: PanelMetrics.iconColumn + 12)
         return !iconStrip.contains(point)
+    }
+
+    @discardableResult func trackWindowDrag(from event: NSEvent) -> Bool {
+        let initialFrame = panel.frame
+        let initialPointer = NSEvent.mouseLocation
+        var didDrag = false
+        while let next = panel.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            if next.type == .leftMouseUp { break }
+            let pointer = NSEvent.mouseLocation
+            let dx = pointer.x - initialPointer.x
+            let dy = pointer.y - initialPointer.y
+            if !didDrag, hypot(dx, dy) < 3 { continue }
+            didDrag = true
+            panel.setFrameOrigin(NSPoint(x: initialFrame.minX + dx,
+                                         y: initialFrame.minY + dy))
+        }
+        return didDrag
     }
 
     func planSwitcherSelection(at point: NSPoint) -> String? {
@@ -1912,7 +1930,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let entering = liveCursorKind == nil && !suppressingFallbackResizeCursor
             suppressingFallbackResizeCursor = false
             liveCursorKind = kind
-            if entering {
+            if entering && !suppressResizeActivationUntilPointerExit {
                 NSApp.activate(ignoringOtherApps: true)
                 panel.makeKeyAndOrderFront(nil)
             }
@@ -1923,7 +1941,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let entering = liveCursorKind == nil && !suppressingFallbackResizeCursor
             liveCursorKind = nil
             suppressingFallbackResizeCursor = true
-            if entering {
+            if entering && !suppressResizeActivationUntilPointerExit {
                 NSApp.activate(ignoringOtherApps: true)
                 panel.makeKeyAndOrderFront(nil)
             }
@@ -1931,8 +1949,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } else if liveCursorKind != nil || suppressingFallbackResizeCursor {
             liveCursorKind = nil
             suppressingFallbackResizeCursor = false
+            suppressResizeActivationUntilPointerExit = false
             NSCursor.arrow.set()
-            NSRunningApplication.runningApplications(withBundleIdentifier: hostBundle).first?.activate()
+            NSRunningApplication.runningApplications(withBundleIdentifier: hostBundle).first?
+                .activate(options: [.activateAllWindows])
+        } else if suppressResizeActivationUntilPointerExit {
+            suppressResizeActivationUntilPointerExit = false
         }
     }
     func syncPlanSwitcherHover() {
@@ -2017,8 +2039,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if NSEvent.pressedMouseButtons & 1 == 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
                 guard let self else { return }
+                self.suppressResizeActivationUntilPointerExit = true
                 NSApp.deactivate()
-                NSRunningApplication.runningApplications(withBundleIdentifier: self.hostBundle).first?.activate()
+                NSRunningApplication.runningApplications(withBundleIdentifier: self.hostBundle).first?
+                    .activate(options: [.activateAllWindows])
             }
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
@@ -2131,6 +2155,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "planSelectorControlVisible": false,
                                      "planIconStyle": "emoji-hover-background",
                                      "planIconGlyphSize": PanelMetrics.planIconGlyph,
+                                     "transitionPlanIconGlyphSize": PanelMetrics.planIconGlyph,
+                                     "transitionPlanIconAnchor": "fixed-screen-center",
                                      "planEmojiPoolCount": planEmojiPool.count,
                                      "planOverflowBadge": "+N",
                                      "planSwitcherPlacement": "immediate-slide-from-active-icon",
@@ -2178,9 +2204,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "collapsedExpandDelay": collapsedExpandDelay,
                                      "collapsedBorder": "1pt-white-17pct",
                                      "collapsedOpacity": 0.82,
-                                     "collapseAnimation": "expanded-plan-icon-converges-and-translates-to-collapsed-position",
+                                     "collapseAnimation": "window-morphs-around-stationary-plan-icon",
                                      "collapseVisualSwap": "morphing-window-shell-with-icon-only-content",
                                      "collapsedDragSuppressesExpansion": true,
+                                     "panelClickFocusesHost": true,
+                                     "windowDragPreservesCurrentFocus": true,
                                      "hoverExpandedFrameContainsSourceIcon": true,
                                      "stepsSurfaceRGB": "#1F1F21",
                                      "collapsedPositionPersistence": "state.json:collapsedWindowFrame",

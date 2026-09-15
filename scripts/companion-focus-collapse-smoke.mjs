@@ -138,6 +138,22 @@ usleep(450000)
 `);
 }
 
+async function click(point) {
+  await runSwift(`
+import AppKit
+import CoreGraphics
+import Darwin
+let screenTop = NSScreen.screens.map { $0.frame.maxY }.max()!
+let target = CGPoint(x: ${point.x}, y: screenTop - ${point.y})
+CGWarpMouseCursorPosition(target)
+usleep(120000)
+CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: target, mouseButton: .left)!.post(tap: .cghidEventTap)
+usleep(70000)
+CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: target, mouseButton: .left)!.post(tap: .cghidEventTap)
+usleep(500000)
+`);
+}
+
 async function hover(point) {
   await runSwift(`
 import AppKit
@@ -229,7 +245,10 @@ try {
   assert.ok(collapsing.window.width > 52, 'focus loss must visibly animate instead of snapping');
   await sendCompanion(socket, { action: 'snapshot', name: 'collapse-transition' });
   assert.equal(collapsing.window.collapseAnimation,
-    'expanded-plan-icon-converges-and-translates-to-collapsed-position');
+    'window-morphs-around-stationary-plan-icon');
+  assert.equal(collapsing.window.transitionPlanIconGlyphSize, collapsing.window.planIconGlyphSize,
+    'the plan emoji must keep one size throughout the morph');
+  assert.equal(collapsing.window.transitionPlanIconAnchor, 'fixed-screen-center');
   assert.equal(collapsing.window.collapseVisualSwap,
     'morphing-window-shell-with-icon-only-content',
     'the visible window shell must shrink with the icon while text stays absent');
@@ -255,14 +274,26 @@ try {
   const heldAfterDrag = (await sendCompanion(socket, { action: 'status' })).state;
   assert.equal(heldAfterDrag.window.presentation, 'collapsed',
     'dragging and releasing over the icon must not trigger hover expansion');
+  assert.equal(heldAfterDrag.frontmostBundle, awayBundle,
+    'finishing a collapsed-icon drag must preserve the current app focus');
   assert.equal(heldAfterDrag.window.collapsedDragSuppressesExpansion, true);
   await movePointer({ x: 100, y: 100 });
 
-  await activate(hostBundle);
-  await eventually(async () => {
-    const state = (await sendCompanion(socket, { action: 'status' })).state;
-    return state.window.presentation === 'expanded' && state.window.resizable && state;
-  }, 'host re-expansion');
+  const draggedCenter = {
+    x: heldAfterDrag.window.x + heldAfterDrag.window.width / 2,
+    y: heldAfterDrag.window.y + heldAfterDrag.window.height / 2,
+  };
+  await click(draggedCenter);
+  try {
+    await eventually(async () => {
+      const state = (await sendCompanion(socket, { action: 'status' })).state;
+      return state.frontmostBundle === hostBundle
+        && state.window.presentation === 'expanded' && state.window.resizable && state;
+    }, 'collapsed icon click focuses host and re-expands');
+  } catch (error) {
+    console.error(JSON.stringify({ collapsedClickState: (await sendCompanion(socket, { action: 'status' })).state }));
+    throw error;
+  }
   const hostExpanded = (await sendCompanion(socket, { action: 'status' })).state;
   assert.equal(hostExpanded.window.transitionContent, 'full-content',
     'expanded content must appear only after the frame animation completes');
@@ -346,13 +377,19 @@ try {
     'moving the unfocused expanded window must not overwrite the focused frame');
   assert.equal(movedUnfocused.window.unfocusedExpandedPositionPersistence,
     'state.json:unfocusedExpandedWindowFrame');
+  assert.equal(movedUnfocused.frontmostBundle, awayBundle,
+    'finishing an unfocused expanded-window drag must preserve the current app focus');
 
-  await activate(hostBundle);
+  await click({
+    x: movedUnfocused.window.x + 150,
+    y: movedUnfocused.window.y + movedUnfocused.window.height - 70,
+  });
   const focusedAgain = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
-    return state.window.presentation === 'expanded' && state.window.resizable
+    return state.frontmostBundle === hostBundle
+      && state.window.presentation === 'expanded' && state.window.resizable
       && Math.abs(state.window.x - focusedFrameBefore.x) < 1 && state;
-  }, 'focused position restored after unfocused drag');
+  }, 'expanded plan click focuses host and restores focused position');
   assert.deepEqual(focusedAgain.unfocusedExpandedWindowFrame, movedUnfocused.unfocusedExpandedWindowFrame,
     'restoring the focused frame must preserve the independent unfocused frame');
 

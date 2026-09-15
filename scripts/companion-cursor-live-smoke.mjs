@@ -46,6 +46,7 @@ usleep(500000)
 import AppKit
 import CoreGraphics
 import Darwin
+let old = CGEvent(source: nil)!.location
 let top = NSScreen.screens.first!.frame.maxY
 CGWarpMouseCursorPosition(CGPoint(x: 502, y: top - 515))
 print("WARPED"); fflush(stdout)
