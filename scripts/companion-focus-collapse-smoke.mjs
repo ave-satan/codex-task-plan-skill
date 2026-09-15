@@ -236,6 +236,14 @@ try {
   }, 'draggable expanded window');
   await movePointer({ x: 100, y: 100 });
 
+  const earlyTransition = (await sendCompanion(socket, { action: 'workspace_transition_probe' })).state;
+  assert.equal(earlyTransition.window.presentation, 'collapsing',
+    'a workspace-start signal must begin the morph before focus or active-Space completion changes');
+  assert.equal(earlyTransition.window.presentationTransitioning, true);
+  assert.equal(earlyTransition.window.lastEarlyPresentationSignal, 'horizontal-swipe');
+  assert.equal(earlyTransition.window.workspaceTransitionStart,
+    'host-deactivation-or-horizontal-swipe-with-space-change-fallback');
+
   await activate(awayBundle, 60000);
   const collapsing = (await sendCompanion(socket, { action: 'status' })).state;
   assert.equal(collapsing.window.presentation, 'collapsing');

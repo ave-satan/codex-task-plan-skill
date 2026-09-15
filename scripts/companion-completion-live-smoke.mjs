@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { sendCompanion } from '../companion-bridge.mjs';
 
 const binary = process.env.COMPANION_BINARY;
@@ -63,10 +64,32 @@ CGWarpMouseCursorPosition(old)
     }
     return false;
   });
-  const clicked = await sendCompanion(socket, {
-    action: 'completion_click_probe', x: 24, y: state.window.height - 24
+  const clicker = spawn('/usr/bin/swift', ['-e', `
+import AppKit
+import CoreGraphics
+import Darwin
+let screenTop = NSScreen.screens.first!.frame.maxY
+let point = CGPoint(x: ${iconX}, y: screenTop - ${iconY})
+CGWarpMouseCursorPosition(point)
+usleep(180000)
+CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)!.post(tap: .cghidEventTap)
+print("DOWN"); fflush(stdout)
+usleep(350000)
+print("BEFORE_UP"); fflush(stdout)
+CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)!.post(tap: .cghidEventTap)
+usleep(350000)
+`], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let clickOutput = '';
+  let announceBeforeUp;
+  const beforeUp = new Promise(resolve => { announceBeforeUp = resolve; });
+  clicker.stdout.on('data', chunk => {
+    clickOutput += chunk;
+    if (clickOutput.includes('BEFORE_UP')) announceBeforeUp();
   });
-  assert.equal(clicked.removed, true, 'completed icon hit-test must remove the plan immediately');
+  await beforeUp;
+  assert.equal((await sendCompanion(socket, { action: 'status' })).state.planCount, 1,
+    'pressing the cross must not remove the plan before mouse-up');
+  assert.equal((await once(clicker, 'exit'))[0], 0);
   await eventually(async () => (await sendCompanion(socket, { action: 'status' })).state.planCount === 0);
   const final = (await sendCompanion(socket, { action: 'status' })).state;
   assert.equal(final.selected, null);

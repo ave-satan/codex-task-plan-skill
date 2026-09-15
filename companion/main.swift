@@ -1228,6 +1228,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var hostView: PanelHostingView<CompanionRootView>!
     var observers: [NSObjectProtocol] = []
     var localEventMonitor: Any?
+    var globalGestureMonitor: Any?
     var dismissed = false
     var listener: Int32 = -1
     var instanceLock: Int32 = -1
@@ -1263,6 +1264,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var hostMissingStartedAt: Date?
     var presentationAnimationToken = 0
     var pendingPresentationSync = false
+    var workspaceGestureGeneration = 0
+    var lastEarlyPresentationSignal: String?
+    var lastEarlyPresentationSignalAt: Date?
     let retentionSeconds = max(0.1, Double(ProcessInfo.processInfo.environment["PLAN_COMPANION_RETENTION_SECONDS"] ?? "") ?? 30)
     let collapsedSize = NSSize(width: 52, height: 52)
     let expandedMinimumSize = NSSize(width: PanelMetrics.minimumWidth, height: PanelMetrics.minimumHeight)
@@ -1375,13 +1379,23 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return event }
             let pointer = NSEvent.mouseLocation
             if let selected = self.planSwitcherSelection(at: pointer) {
-                if self.removeCompletedPlanIfReady(selected) { return nil }
+                if self.completedPlanIsReady(selected) {
+                    if self.trackPointerClick(from: event) {
+                        _ = self.removeCompletedPlanIfReady(selected)
+                    }
+                    return nil
+                }
                 self.store.select(selected)
                 self.restoreHostFocusAfterPointerRelease()
                 return nil
             }
             if self.activePlanIconContains(pointer), let selected = self.store.selected,
-               self.removeCompletedPlanIfReady(selected) { return nil }
+               self.completedPlanIsReady(selected) {
+                if self.trackPointerClick(from: event) {
+                    _ = self.removeCompletedPlanIfReady(selected)
+                }
+                return nil
+            }
             if self.panel.frame.contains(pointer), self.canBeginWindowDrag(at: pointer) {
                 let wasCollapsed = self.store.collapsed
                 let activeAtDragStart = self.store.active?.id
@@ -1409,6 +1423,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             return event
         }
+        globalGestureMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.swipe]) { [weak self] event in
+            guard abs(event.deltaX) > abs(event.deltaY), abs(event.deltaX) > 0.01 else { return }
+            DispatchQueue.main.async {
+                self?.beginEarlyPresentationTransition(source: "horizontal-swipe")
+            }
+        }
         store.changed = { [weak self] in self?.stateChanged() }
         store.removeRequested = { [weak self] id in
             _ = self?.removeCompletedPlanIfReady(id)
@@ -1417,10 +1437,23 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         observers.append(center.addObserver(forName: NSWorkspace.didActivateApplicationNotification,
                                              object: nil, queue: .main) { [weak self] note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            self?.workspaceGestureGeneration += 1
             self?.syncPresentation(hostDidActivate: app?.bundleIdentifier == self?.hostBundle)
+        })
+        observers.append(center.addObserver(forName: NSWorkspace.didDeactivateApplicationNotification,
+                                             object: nil, queue: .main) { [weak self] note in
+            guard let self,
+                  let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.bundleIdentifier == self.hostBundle else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      NSWorkspace.shared.frontmostApplication?.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+                self.beginEarlyPresentationTransition(source: "host-deactivated", requireHostFrontmost: false)
+            }
         })
         observers.append(center.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification,
                                              object: nil, queue: .main) { [weak self] _ in
+            self?.workspaceGestureGeneration += 1
             self?.syncPresentation()
         })
         observers.append(center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification,
@@ -1518,6 +1551,19 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return didDrag
     }
 
+    func trackPointerClick(from event: NSEvent, slop: CGFloat = 6) -> Bool {
+        let initialPointer = NSEvent.mouseLocation
+        var maximumDistance: CGFloat = 0
+        while let next = panel.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            let pointer = NSEvent.mouseLocation
+            maximumDistance = max(maximumDistance,
+                                  hypot(pointer.x - initialPointer.x,
+                                        pointer.y - initialPointer.y))
+            if next.type == .leftMouseUp { return maximumDistance <= slop }
+        }
+        return false
+    }
+
     func planSwitcherSelection(at point: NSPoint) -> String? {
         guard !store.collapsed, store.planSwitcherExpanded else { return nil }
         let otherPlans = store.plans.filter { $0.id != store.selected }
@@ -1544,11 +1590,16 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @discardableResult func removeCompletedPlanIfReady(_ id: String) -> Bool {
-        guard let plan = store.plans.first(where: { $0.id == id }), plan.status == "completed" else { return false }
-        if let completedAt = plan.completedAt.flatMap(parseISODate),
-           Date().timeIntervalSince(completedAt) < completionCheckDuration { return false }
+        guard completedPlanIsReady(id) else { return false }
         removePlan(id, event: "plan_removed_by_user")
         return true
+    }
+
+    func completedPlanIsReady(_ id: String, at now: Date = Date()) -> Bool {
+        guard let plan = store.plans.first(where: { $0.id == id }),
+              plan.status == "completed" else { return false }
+        guard let completedAt = plan.completedAt.flatMap(parseISODate) else { return true }
+        return now.timeIntervalSince(completedAt) >= completionCheckDuration
     }
 
     func removePlan(_ id: String, event: String) {
@@ -1786,6 +1837,29 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.orderFrontRegardless()
         try? persist()
         journal("expanded_hover")
+    }
+
+    func beginEarlyPresentationTransition(source: String, requireHostFrontmost: Bool = true) {
+        guard focusCollapseEnabled, store.active != nil, !dismissed else { return }
+        if requireHostFrontmost {
+            guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == hostBundle else { return }
+        }
+        workspaceGestureGeneration += 1
+        let generation = workspaceGestureGeneration
+        lastEarlyPresentationSignal = source
+        lastEarlyPresentationSignalAt = Date()
+        collapseToIcon(animated: true)
+        journal("early_presentation_transition")
+
+        // A global swipe can also belong to an app-level gesture. If no Space or
+        // focus transition follows, restore the host presentation after a short grace.
+        guard source == "horizontal-swipe" else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+            guard let self, self.workspaceGestureGeneration == generation,
+                  NSWorkspace.shared.frontmostApplication?.bundleIdentifier == self.hostBundle else { return }
+            self.expandForHost(animated: true)
+            self.journal("early_presentation_transition_recovered")
+        }
     }
 
     func syncPresentation(hostDidActivate: Bool = false) {
@@ -2195,6 +2269,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "completedPlanRetentionSeconds": retentionSeconds,
                                      "focusCollapseEnabled": focusCollapseEnabled,
                                      "hostLifecycle": "workspace-termination-observer-with-750ms-running-app-fallback",
+                                     "workspaceTransitionStart": "host-deactivation-or-horizontal-swipe-with-space-change-fallback",
+                                     "lastEarlyPresentationSignal": lastEarlyPresentationSignal ?? NSNull(),
+                                     "lastEarlyPresentationSignalAt": lastEarlyPresentationSignalAt.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull(),
                                      "presentation": collapsingToIcon ? "collapsing" : (store.collapsed ? "collapsed" : "expanded"),
                                      "presentationTransitioning": applyingPresentationFrame,
                                      "transitionContent": store.collapsed ? "collapsed-icon" :
@@ -2322,6 +2399,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 let removed = activePlanIconContains(point)
                     && store.selected.map(removeCompletedPlanIfReady) == true
                 return ["ok": true, "removed": removed, "state": snapshot()]
+            case "workspace_transition_probe":
+                beginEarlyPresentationTransition(source: "horizontal-swipe")
             case "status": break
             case "snapshot":
                 guard let name = command.name, name.range(of: "^[a-zA-Z0-9_-]{1,60}$", options: .regularExpression) != nil else { throw NSError(domain: "Invalid snapshot name", code: 5) }
@@ -2406,6 +2485,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         journal("stopped")
         for observer in observers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        if let globalGestureMonitor { NSEvent.removeMonitor(globalGestureMonitor) }
+        if let localEventMonitor { NSEvent.removeMonitor(localEventMonitor) }
         if listener >= 0 { Darwin.close(listener); unlink(socketPath) }
         if instanceLock >= 0 { Darwin.close(instanceLock) }
     }
