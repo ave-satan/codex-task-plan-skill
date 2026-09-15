@@ -1286,6 +1286,13 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var lastHostWindowPollAt = Date.distantPast
     var earlyHostDepartureBaseline: HostWindowObservation?
     var earlyHostDepartureReturnSamples = 0
+    var spaceDepartureActive = false
+    var spaceArrivalPending = false
+    var hostMinimizeBaseline: HostWindowObservation?
+    var hostMinimizeCandidateSamples = 0
+    var hostMinimizingActive = false
+    var hostWindowMinimized = false
+    var lastHostMinimizeTrigger: String?
     let retentionSeconds = max(0.1, Double(ProcessInfo.processInfo.environment["PLAN_COMPANION_RETENTION_SECONDS"] ?? "") ?? 30)
     let collapsedSize = NSSize(width: 52, height: 52)
     let expandedMinimumSize = NSSize(width: PanelMetrics.minimumWidth, height: PanelMetrics.minimumHeight)
@@ -1452,8 +1459,17 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         observers.append(center.addObserver(forName: NSWorkspace.didActivateApplicationNotification,
                                              object: nil, queue: .main) { [weak self] note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            self?.workspaceGestureGeneration += 1
-            self?.syncPresentation(hostDidActivate: app?.bundleIdentifier == self?.hostBundle)
+            guard let self else { return }
+            self.workspaceGestureGeneration += 1
+            let hostActivated = app?.bundleIdentifier == self.hostBundle
+            if hostActivated, self.spaceArrivalPending {
+                self.spaceArrivalPending = false
+                self.spaceDepartureActive = false
+                self.expandForHost(animated: false)
+                self.journal("space_arrival_expanded")
+            } else {
+                self.syncPresentation(hostDidActivate: hostActivated)
+            }
         })
         observers.append(center.addObserver(forName: NSWorkspace.didDeactivateApplicationNotification,
                                              object: nil, queue: .main) { [weak self] note in
@@ -1463,13 +1479,28 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async { [weak self] in
                 guard let self,
                       NSWorkspace.shared.frontmostApplication?.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
-                self.beginEarlyPresentationTransition(source: "host-deactivated", requireHostFrontmost: false)
+                if self.spaceDepartureActive {
+                    self.journal("space_departure_settled")
+                } else {
+                    self.beginEarlyPresentationTransition(source: "host-deactivated", requireHostFrontmost: false)
+                }
             }
         })
         observers.append(center.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification,
                                              object: nil, queue: .main) { [weak self] _ in
-            self?.workspaceGestureGeneration += 1
-            self?.syncPresentation()
+            guard let self else { return }
+            self.workspaceGestureGeneration += 1
+            if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == self.hostBundle,
+               self.spaceArrivalPending {
+                self.spaceArrivalPending = false
+                self.spaceDepartureActive = false
+                self.expandForHost(animated: false)
+                self.journal("space_arrival_expanded")
+            } else {
+                self.spaceArrivalPending = false
+                self.spaceDepartureActive = false
+                self.syncPresentation()
+            }
         })
         observers.append(center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification,
                                              object: nil, queue: .main) { [weak self] note in
@@ -1895,6 +1926,42 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         journal("early_presentation_transition")
     }
 
+    func beginSpaceDeparture() {
+        guard focusCollapseEnabled, store.active != nil, !dismissed else { return }
+        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == hostBundle else { return }
+        workspaceGestureGeneration += 1
+        spaceDepartureActive = true
+        spaceArrivalPending = false
+        lastEarlyPresentationSignal = "host-window-motion-leaving"
+        lastEarlyPresentationSignalAt = Date()
+        collapseToIcon(animated: false)
+        journal("space_departure_collapsed")
+    }
+
+    func beginHostMinimize(from baseline: HostWindowObservation, trigger: String) {
+        guard focusCollapseEnabled, store.active != nil, !dismissed else { return }
+        hostMinimizeBaseline = baseline
+        hostMinimizingActive = true
+        hostWindowMinimized = false
+        hostMinimizeCandidateSamples = 0
+        lastHostMinimizeTrigger = trigger
+        lastEarlyPresentationSignal = "host-window-minimizing"
+        lastEarlyPresentationSignalAt = Date()
+        collapseToIcon(animated: true)
+        journal("host_minimize_started")
+    }
+
+    func beginHostRestore() {
+        guard focusCollapseEnabled, store.active != nil, store.collapsed, !dismissed else { return }
+        hostWindowMinimized = false
+        hostMinimizingActive = false
+        hostMinimizeCandidateSamples = 0
+        lastEarlyPresentationSignal = "host-window-restoring"
+        lastEarlyPresentationSignalAt = Date()
+        expandForHost(animated: true)
+        journal("host_restore_started")
+    }
+
     func primaryHostWindowObservation() -> HostWindowObservation? {
         guard let hostPID = NSRunningApplication.runningApplications(withBundleIdentifier: hostBundle)
                 .first?.processIdentifier,
@@ -1911,19 +1978,21 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
     }
 
-    func beginEarlyHostArrival() {
+    func noteSpaceArrival() {
         guard focusCollapseEnabled, store.active != nil, store.collapsed, !dismissed else { return }
-        workspaceGestureGeneration += 1
-        let generation = workspaceGestureGeneration
+        guard !spaceArrivalPending else { return }
+        spaceArrivalPending = true
         lastEarlyPresentationSignal = "host-window-motion-arriving"
         lastEarlyPresentationSignalAt = Date()
-        expandForHost(animated: true)
-        journal("early_host_arrival")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            guard let self, self.workspaceGestureGeneration == generation,
-                  NSWorkspace.shared.frontmostApplication?.bundleIdentifier != self.hostBundle else { return }
-            self.collapseToIcon(animated: true)
-            self.journal("early_host_arrival_recovered")
+        journal("space_arrival_observed")
+    }
+
+    func hostWindowIsMeaningfullyVisible(_ observation: HostWindowObservation) -> Bool {
+        let required = min(48, observation.frame.width * 0.04)
+        return NSScreen.screens.contains { screen in
+            let overlap = max(0, min(observation.frame.maxX, screen.frame.maxX)
+                - max(observation.frame.minX, screen.frame.minX))
+            return overlap >= required
         }
     }
 
@@ -1945,6 +2014,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             lastHostWindowObservation = nil
             earlyHostDepartureBaseline = nil
             earlyHostDepartureReturnSamples = 0
+            hostMinimizeBaseline = nil
+            hostMinimizeCandidateSamples = 0
+            hostMinimizingActive = false
+            hostWindowMinimized = false
             return
         }
         let now = Date()
@@ -1958,34 +2031,81 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         defer { lastHostWindowObservation = current }
         let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+
+        if hostWindowMinimized, lastHostWindowObservation == nil, current != nil {
+            beginHostRestore()
+            return
+        }
+        if hostMinimizingActive {
+            if current == nil {
+                hostMinimizingActive = false
+                hostWindowMinimized = true
+                journal("host_minimized")
+            } else if let baseline = hostMinimizeBaseline,
+                      current!.id == baseline.id,
+                      current!.frame.width * current!.frame.height
+                        >= baseline.frame.width * baseline.frame.height * 0.98 {
+                hostMinimizingActive = false
+                hostWindowMinimized = false
+                hostMinimizeBaseline = nil
+                if store.collapsed { expandForHost(animated: true) }
+                journal("host_minimize_cancelled")
+            }
+            return
+        }
+
+        if front == hostBundle, !store.collapsed, !collapsingToIcon,
+           NSEvent.pressedMouseButtons & 1 == 0,
+           let previous = lastHostWindowObservation, current == nil {
+            beginHostMinimize(from: previous, trigger: "window-disappeared-fallback")
+            hostWindowMinimized = true
+            hostMinimizingActive = false
+            journal("host_minimized")
+            return
+        }
+
         if front == hostBundle, !store.collapsed, !collapsingToIcon,
            NSEvent.pressedMouseButtons & 1 == 0,
            let previous = lastHostWindowObservation, let current,
            previous.id == current.id {
+            let widthDelta = current.frame.width - previous.frame.width
+            let heightDelta = current.frame.height - previous.frame.height
+            if widthDelta <= -8, heightDelta <= -6 {
+                if hostMinimizeCandidateSamples == 0 { hostMinimizeBaseline = previous }
+                hostMinimizeCandidateSamples += 1
+                if let baseline = hostMinimizeBaseline,
+                   hostMinimizeCandidateSamples >= 2,
+                   current.frame.width * current.frame.height
+                    <= baseline.frame.width * baseline.frame.height * 0.92 {
+                    beginHostMinimize(from: baseline, trigger: "proportional-shrink")
+                }
+                return
+            }
+            hostMinimizeCandidateSamples = 0
+            hostMinimizeBaseline = nil
             let deltaX = current.frame.minX - previous.frame.minX
             let deltaY = current.frame.minY - previous.frame.minY
             if abs(deltaX) >= 8, abs(deltaX) > abs(deltaY) * 2 {
                 earlyHostDepartureBaseline = previous
                 earlyHostDepartureReturnSamples = 0
-                beginEarlyPresentationTransition(source: "host-window-motion-leaving")
+                beginSpaceDeparture()
             }
         } else if front == hostBundle, store.collapsed,
                   lastEarlyPresentationSignal == "host-window-motion-leaving",
                   hostWindowReturnedToDepartureBaseline(current) {
             workspaceGestureGeneration += 1
+            spaceDepartureActive = false
             earlyHostDepartureBaseline = nil
             earlyHostDepartureReturnSamples = 0
-            expandForHost(animated: true)
-            journal("early_host_departure_recovered")
+            expandForHost(animated: false)
+            journal("space_departure_cancelled")
         } else if front != hostBundle, store.collapsed,
-                  lastHostWindowObservation == nil, current != nil {
-            beginEarlyHostArrival()
-        } else if front != hostBundle, !store.collapsed,
-                  lastEarlyPresentationSignal == "host-window-motion-arriving",
-                  lastHostWindowObservation != nil, current == nil {
-            workspaceGestureGeneration += 1
-            collapseToIcon(animated: true)
-            journal("early_host_arrival_recovered")
+                  lastHostWindowObservation == nil, let current,
+                  hostWindowIsMeaningfullyVisible(current) {
+            noteSpaceArrival()
+        } else if front != hostBundle, spaceArrivalPending, current == nil {
+            spaceArrivalPending = false
+            journal("space_arrival_cancelled")
         }
     }
 
@@ -2396,8 +2516,14 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "completedPlanRetentionSeconds": retentionSeconds,
                                      "focusCollapseEnabled": focusCollapseEnabled,
                                      "hostLifecycle": "workspace-termination-observer-with-750ms-running-app-fallback",
-                                     "workspaceTransitionStart": "window-server-motion-with-workspace-notification-fallback",
+                                     "workspaceTransitionBehavior": "instant-icon-on-space-focus-morph-on-same-space",
                                      "workspaceWindowMotionPollingHz": 30,
+                                     "spaceDepartureActive": spaceDepartureActive,
+                                     "spaceArrivalPending": spaceArrivalPending,
+                                     "hostMinimizeDetection": "window-server-two-frame-proportional-shrink",
+                                     "lastHostMinimizeTrigger": lastHostMinimizeTrigger ?? NSNull(),
+                                     "hostMinimizingActive": hostMinimizingActive,
+                                     "hostWindowMinimized": hostWindowMinimized,
                                      "hostWindowObservationInitialized": hostWindowObservationInitialized,
                                      "hostWindowObservation": lastHostWindowObservation.map {
                                         ["id": $0.id, "x": $0.frame.minX, "y": $0.frame.minY,
@@ -2536,9 +2662,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 return ["ok": true, "removed": removed, "state": snapshot()]
             case "workspace_transition_probe":
                 if command.name == "arriving" {
-                    beginEarlyHostArrival()
+                    noteSpaceArrival()
+                } else if command.name == "focus-leaving" {
+                    beginEarlyPresentationTransition(source: "host-deactivated")
                 } else {
-                    beginEarlyPresentationTransition(source: "host-window-motion-leaving")
+                    beginSpaceDeparture()
                 }
                 return ["ok": true, "state": snapshot()]
             case "status": break

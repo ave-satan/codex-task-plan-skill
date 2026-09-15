@@ -64,12 +64,14 @@ async function buildFocusApp(name, bundle) {
   await writeFile(source, `import AppKit
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
-let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 320, height: 240),
-  styleMask: [.titled], backing: .buffered, defer: false)
+let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 640, height: 480),
+  styleMask: [.titled, .miniaturizable], backing: .buffered, defer: false)
 window.title = "${name}"
 window.makeKeyAndOrderFront(nil)
 let moveURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.move`)}")
 let cancelURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.cancel-move`)}")
+let minimizeURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.minimize`)}")
+let restoreURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.restore`)}")
 var moveDeltas: [CGFloat] = []
 Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { _ in
   if FileManager.default.fileExists(atPath: moveURL.path) {
@@ -79,6 +81,14 @@ Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { _ in
   if FileManager.default.fileExists(atPath: cancelURL.path) {
     try? FileManager.default.removeItem(at: cancelURL)
     moveDeltas = Array(repeating: 15, count: 8) + Array(repeating: -15, count: 8)
+  }
+  if FileManager.default.fileExists(atPath: minimizeURL.path) {
+    try? FileManager.default.removeItem(at: minimizeURL)
+    window.miniaturize(nil)
+  }
+  if FileManager.default.fileExists(atPath: restoreURL.path) {
+    try? FileManager.default.removeItem(at: restoreURL)
+    window.deminiaturize(nil)
   }
   if !moveDeltas.isEmpty {
     window.setFrameOrigin(NSPoint(x: window.frame.minX + moveDeltas.removeFirst(), y: window.frame.minY))
@@ -110,6 +120,11 @@ usleep(${settleMicroseconds})
 
 async function moveFixtureWindow(bundle, cancelled = false) {
   await writeFile(join(fixture, `${bundle}.${cancelled ? 'cancel-move' : 'move'}`), '1');
+  await delay(25);
+}
+
+async function setFixtureMiniaturized(bundle, minimized) {
+  await writeFile(join(fixture, `${bundle}.${minimized ? 'minimize' : 'restore'}`), '1');
   await delay(25);
 }
 
@@ -241,9 +256,10 @@ try {
   const arriving = (await sendCompanion(socket, {
     action: 'workspace_transition_probe', name: 'arriving',
   })).state;
-  assert.equal(arriving.window.presentation, 'expanded');
-  assert.equal(arriving.window.presentationTransitioning, true,
-    'WindowServer arrival motion must start expansion before host activation completes');
+  assert.equal(arriving.window.presentation, 'collapsed');
+  assert.equal(arriving.window.presentationTransitioning, false,
+    'a Space that merely exposes the host window must keep the compact icon');
+  assert.equal(arriving.window.spaceArrivalPending, true);
   assert.equal(arriving.window.lastEarlyPresentationSignal, 'host-window-motion-arriving');
 
   await activate(hostBundle);
@@ -254,14 +270,75 @@ try {
   }, 'expanded host window');
   assert.equal(expanded.window.width, 360);
   assert.equal(expanded.window.resizable, true);
+  assert.equal(expanded.window.presentationTransitioning, false,
+    'arrival on the host Space must restore the plan without a morph');
+
+  await activate(awayBundle, 60000);
+  const focusTransition = (await sendCompanion(socket, { action: 'status' })).state;
+  assert.equal(focusTransition.window.presentation, 'collapsing');
+  assert.equal(focusTransition.window.presentationTransitioning, true,
+    'ordinary focus loss on the host Space must retain the morph');
+  assert.equal(focusTransition.window.presentationAnimationDriver,
+    'common-runloop-direct-window-frames-60fps');
+  assert.equal(focusTransition.window.presentationTweenActive, true);
+  const focusWidth = focusTransition.window.width;
+  await delay(35);
+  const laterFocusTransition = (await sendCompanion(socket, { action: 'status' })).state;
+  assert.ok(laterFocusTransition.window.width < focusWidth,
+    'focus morph must present another smaller window frame while collapse is running');
+  await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.window.presentation === 'collapsed' && !state.window.presentationTransitioning && state;
+  }, 'focus-loss collapse');
+
+  await activate(hostBundle, 60000);
+  const focusExpansion = (await sendCompanion(socket, { action: 'status' })).state;
+  assert.equal(focusExpansion.window.presentationTransitioning, true,
+    'ordinary focus return on the host Space must retain the morph');
+  const expandedAgain = await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.window.presentation === 'expanded' && !state.window.presentationTransitioning
+      && Math.abs(state.window.width - 360) < 0.5 && state;
+  }, 'focus-return expansion');
+
+  if (useFixtureApps) {
+    await setFixtureMiniaturized(hostBundle, true);
+    const minimizing = await eventually(async () => {
+      const state = (await sendCompanion(socket, { action: 'status' })).state;
+      return state.window.lastEarlyPresentationSignal === 'host-window-minimizing'
+        && state.window.presentationTransitioning && state;
+    }, 'window minimize starts the morph before focus changes');
+    assert.equal(minimizing.window.hostMinimizeDetection,
+      'window-server-two-frame-proportional-shrink');
+    assert.equal(minimizing.window.lastHostMinimizeTrigger, 'proportional-shrink',
+      'the fixture must expose intermediate WindowServer frames, not exercise only the fallback');
+    await eventually(async () => {
+      const state = (await sendCompanion(socket, { action: 'status' })).state;
+      return state.window.hostWindowMinimized && state.window.presentation === 'collapsed'
+        && !state.window.presentationTransitioning && state;
+    }, 'minimized host leaves the compact icon');
+
+    await setFixtureMiniaturized(hostBundle, false);
+    await eventually(async () => {
+      const state = (await sendCompanion(socket, { action: 'status' })).state;
+      return state.window.lastEarlyPresentationSignal === 'host-window-restoring'
+        && state.window.presentationTransitioning && state;
+    }, 'window restore starts the focus morph');
+    await eventually(async () => {
+      const state = (await sendCompanion(socket, { action: 'status' })).state;
+      return state.window.presentation === 'expanded' && !state.window.presentationTransitioning
+        && Math.abs(state.window.width - 360) < 0.5 && state;
+    }, 'restored host expands the plan');
+  }
+
   const expandedDragStart = {
-    x: expanded.window.x + 120,
-    y: expanded.window.y + expanded.window.height - 24,
+    x: expandedAgain.window.x + 120,
+    y: expandedAgain.window.y + expandedAgain.window.height - 24,
   };
   await drag(expandedDragStart, { x: expandedDragStart.x + 60, y: expandedDragStart.y });
   await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
-    return Math.abs(state.window.x - expanded.window.x) > 40 && state;
+    return Math.abs(state.window.x - expandedAgain.window.x) > 40 && state;
   }, 'draggable expanded window');
   await movePointer({ x: 100, y: 100 });
 
@@ -270,8 +347,8 @@ try {
     await eventually(async () => {
       const state = (await sendCompanion(socket, { action: 'status' })).state;
       return state.window.lastEarlyPresentationSignal === 'host-window-motion-leaving'
-        && state.window.presentationTransitioning && state;
-    }, 'cancelled WindowServer motion starts collapse');
+        && state.window.presentation === 'collapsed' && !state.window.presentationTransitioning && state;
+    }, 'cancelled Space motion shows the icon without a morph');
     const recovered = await eventually(async () => {
       const state = (await sendCompanion(socket, { action: 'status' })).state;
       return state.frontmostBundle === hostBundle && state.window.presentation === 'expanded'
@@ -284,41 +361,22 @@ try {
   else await sendCompanion(socket, { action: 'workspace_transition_probe' });
   const earlyTransition = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
-    return state.window.presentation === 'collapsing' && state;
-  }, 'WindowServer host-window motion starts collapse');
-  assert.equal(earlyTransition.window.presentation, 'collapsing',
-    'a workspace-start signal must begin the morph before focus or active-Space completion changes');
-  assert.equal(earlyTransition.window.presentationTransitioning, true);
+    return state.window.presentation === 'collapsed' && state;
+  }, 'WindowServer host-window motion switches to the icon');
+  assert.equal(earlyTransition.window.presentation, 'collapsed');
+  assert.equal(earlyTransition.window.presentationTransitioning, false,
+    'Space departure must not run the focus morph');
   assert.equal(earlyTransition.window.lastEarlyPresentationSignal, 'host-window-motion-leaving');
-  assert.equal(earlyTransition.window.workspaceTransitionStart,
-    'window-server-motion-with-workspace-notification-fallback');
+  assert.equal(earlyTransition.window.workspaceTransitionBehavior,
+    'instant-icon-on-space-focus-morph-on-same-space');
   assert.equal(earlyTransition.window.workspaceWindowMotionPollingHz, 30);
-  assert.equal(earlyTransition.window.presentationAnimationDriver,
-    'common-runloop-direct-window-frames-60fps');
-  assert.equal(earlyTransition.window.presentationTweenActive, true);
-
-  const earlyWidth = earlyTransition.window.width;
-  await delay(35);
-  const laterTransition = (await sendCompanion(socket, { action: 'status' })).state;
-  assert.ok(laterTransition.window.width < earlyWidth,
-    'direct frame tween must present another smaller window frame while collapse is running');
+  assert.equal(earlyTransition.window.width, 52);
 
   await activate(awayBundle, 60000);
   const collapsing = (await sendCompanion(socket, { action: 'status' })).state;
-  assert.equal(collapsing.window.presentation, 'collapsing');
-  assert.equal(collapsing.window.presentationTransitioning, true);
-  assert.equal(collapsing.window.transitionContent, 'plan-icon-only',
-    'collapse must hide plan text and render only the icon while the frame shrinks');
-  assert.ok(collapsing.window.width > 52, 'focus loss must visibly animate instead of snapping');
-  await sendCompanion(socket, { action: 'snapshot', name: 'collapse-transition' });
-  assert.equal(collapsing.window.collapseAnimation,
-    'window-morphs-around-stationary-plan-icon');
-  assert.equal(collapsing.window.transitionPlanIconGlyphSize, collapsing.window.planIconGlyphSize,
-    'the plan emoji must keep one size throughout the morph');
-  assert.equal(collapsing.window.transitionPlanIconAnchor, 'fixed-screen-center');
-  assert.equal(collapsing.window.collapseVisualSwap,
-    'morphing-window-shell-with-icon-only-content',
-    'the visible window shell must shrink with the icon while text stays absent');
+  assert.equal(collapsing.window.presentation, 'collapsed');
+  assert.equal(collapsing.window.presentationTransitioning, false);
+  assert.equal(collapsing.window.transitionContent, 'collapsed-icon');
   const collapsed = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
     return state.visible && state.window.presentation === 'collapsed'
