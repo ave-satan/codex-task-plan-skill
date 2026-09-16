@@ -72,6 +72,8 @@ let moveURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.move`)}")
 let cancelURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.cancel-move`)}")
 let minimizeURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.minimize`)}")
 let restoreURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.restore`)}")
+let resetMoveURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.reset-move`)}")
+let initialOrigin = window.frame.origin
 var moveDeltas: [CGFloat] = []
 Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { _ in
   if FileManager.default.fileExists(atPath: moveURL.path) {
@@ -89,6 +91,11 @@ Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { _ in
   if FileManager.default.fileExists(atPath: restoreURL.path) {
     try? FileManager.default.removeItem(at: restoreURL)
     window.deminiaturize(nil)
+  }
+  if FileManager.default.fileExists(atPath: resetMoveURL.path) {
+    try? FileManager.default.removeItem(at: resetMoveURL)
+    moveDeltas = []
+    window.setFrameOrigin(initialOrigin)
   }
   if !moveDeltas.isEmpty {
     window.setFrameOrigin(NSPoint(x: window.frame.minX + moveDeltas.removeFirst(), y: window.frame.minY))
@@ -121,6 +128,11 @@ usleep(${settleMicroseconds})
 async function moveFixtureWindow(bundle, cancelled = false) {
   await writeFile(join(fixture, `${bundle}.${cancelled ? 'cancel-move' : 'move'}`), '1');
   await delay(25);
+}
+
+async function resetFixtureWindow(bundle) {
+  await writeFile(join(fixture, `${bundle}.reset-move`), '1');
+  await delay(80);
 }
 
 async function setFixtureMiniaturized(bundle, minimized) {
@@ -272,6 +284,13 @@ try {
   assert.equal(expanded.window.resizable, true);
   assert.equal(expanded.window.presentationTransitioning, false,
     'arrival on the host Space must restore the plan without a morph');
+  assert.equal(expanded.window.spaceRemoteIconVisible, true,
+    'the compact icon must already exist on remote Spaces before a swipe starts');
+  assert.equal(expanded.window.spaceRemoteIconFrame.width, 52);
+  assert.ok(expanded.window.spaceRemoteIconAssignedSpaces.length > 0);
+  assert.ok(!expanded.window.spaceRemoteIconAssignedSpaces.includes(
+    expanded.window.spaceMainAssignedSpaces[0]),
+  'the preloaded remote icon must not cover the active host Space');
 
   await activate(awayBundle, 60000);
   const focusTransition = (await sendCompanion(socket, { action: 'status' })).state;
@@ -347,16 +366,19 @@ try {
     const cancelledDeparture = await eventually(async () => {
       const state = (await sendCompanion(socket, { action: 'status' })).state;
       return state.window.lastEarlyPresentationSignal === 'host-window-motion-leaving'
-        && state.window.spaceIconProxyVisible && !state.visible
-        && state.window.presentation === 'expanded' && state;
-    }, 'cancelled Space motion uses a fixed-size proxy without resizing the host window');
-    assert.equal(cancelledDeparture.window.spaceIconProxyFrame.width, 52);
-    assert.equal(cancelledDeparture.window.spaceIconProxyFrame.height, 52);
+        && state.window.spaceMirrorVisible
+        && state.window.spaceMirrorPresentation === 'expanded' && state;
+    }, 'cancelled Space motion keeps an expanded mirror on the host Space');
+    assert.equal(cancelledDeparture.window.spaceMirrorFrame.width, 360);
+    assert.ok(cancelledDeparture.window.spaceMirrorAssignedSpaces.includes(
+      cancelledDeparture.window.hostSpaceID));
+    assert.ok(!cancelledDeparture.window.spaceMainAssignedSpaces.includes(
+      cancelledDeparture.window.hostSpaceID));
     assert.equal(cancelledDeparture.window.spaceOriginWasCollapsed, false);
     const recovered = await eventually(async () => {
       const state = (await sendCompanion(socket, { action: 'status' })).state;
       return state.frontmostBundle === hostBundle && state.window.presentation === 'expanded'
-        && !state.window.presentationTransitioning && !state.window.spaceIconProxyVisible && state;
+        && !state.window.presentationTransitioning && !state.window.spaceMirrorVisible && state;
     }, 'cancelled WindowServer motion restores expanded host plan');
     assert.equal(recovered.window.resizable, true);
   }
@@ -365,34 +387,61 @@ try {
   else await sendCompanion(socket, { action: 'workspace_transition_probe' });
   const earlyTransition = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
-    return state.window.spaceIconProxyVisible && !state.visible
-      && state.window.presentation === 'expanded' && state;
-  }, 'WindowServer host-window motion shows the stable icon proxy');
-  assert.equal(earlyTransition.window.presentation, 'expanded',
-    'the host-Space presentation state must not change while the Space gesture is running');
-  assert.equal(earlyTransition.window.presentationTransitioning, false,
-    'Space departure must not run the focus morph');
+    return state.window.spaceMirrorVisible
+      && state.window.spaceMirrorPresentation === 'expanded'
+      && state.window.presentation === 'collapsed' && state;
+  }, 'WindowServer motion routes the expanded mirror and compact interactive panel by Space');
+  assert.equal(earlyTransition.window.spaceMirrorFrame.width, 360,
+    'the Codex Space must retain the complete expanded panel during the gesture');
   assert.equal(earlyTransition.window.lastEarlyPresentationSignal, 'host-window-motion-leaving');
   assert.equal(earlyTransition.window.workspaceTransitionBehavior,
-    'fixed-size-proxy-during-space-preserve-host-state');
+    'preloaded-remote-icon-with-host-mirror');
   assert.equal(earlyTransition.window.workspaceWindowMotionPollingHz, 30);
-  assert.equal(earlyTransition.window.spaceIconProxyFrame.width, 52);
-  assert.equal(earlyTransition.window.spaceIconProxyFrame.height, 52);
+  assert.equal(earlyTransition.window.width, 52,
+    'every non-Codex Space must receive the already compact interactive window');
+  assert.equal(earlyTransition.window.transitionContent, 'collapsed-icon',
+    'the interactive window must finish rendering the compact icon before it is routed away');
+  assert.equal(earlyTransition.window.presentationTransitioning, false,
+    'Space routing must not expose an asynchronous full-panel-to-icon frame on another Space');
+  assert.equal(earlyTransition.window.alpha, 0,
+    'the late-routed interactive window must remain hidden behind the preloaded proxy during the gesture');
+  assert.equal(earlyTransition.window.spaceRemoteIconVisible, true);
+  assert.deepEqual(new Set(earlyTransition.window.spaceRemoteIconAssignedSpaces),
+    new Set(earlyTransition.window.spaceMainAssignedSpaces),
+  'the preloaded proxy must cover every remote Space before the gesture completes');
+  assert.ok(earlyTransition.window.spaceMirrorAssignedSpaces.includes(earlyTransition.window.hostSpaceID));
+  assert.ok(!earlyTransition.window.spaceMainAssignedSpaces.includes(earlyTransition.window.hostSpaceID));
   assert.equal(earlyTransition.window.spaceOriginWasCollapsed, false);
 
   await sendCompanion(socket, { action: 'workspace_transition_probe', name: 'departure-completed' });
   const departed = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
     return state.window.awayFromHostSpace && state.window.presentation === 'collapsed'
-      && !state.window.spaceIconProxyVisible && state;
-  }, 'completed Space departure hands off to the normal interactive compact icon');
+      && state.window.spaceMirrorVisible && state;
+  }, 'completed Space departure keeps both Space-specific representations');
   assert.equal(departed.window.width, 52);
+  assert.equal(departed.window.alpha, 0.82);
+  assert.equal(departed.window.spaceRemoteIconVisible, false,
+    'the interactive compact window replaces the proxy after the Space switch completes');
+  assert.ok(!departed.window.spaceMainAssignedSpaces.includes(departed.window.hostSpaceID),
+    'finishing the gesture must not pull the compact window back onto the Codex Space');
+  assert.deepEqual(departed.window.spaceMirrorAssignedSpaces, [departed.window.hostSpaceID],
+    'the expanded mirror must remain exclusively on the Codex Space after departure');
 
+  // Fixture apps live on one physical Space. Restore the routed panel before
+  // exercising pointer interaction; Space ownership itself was asserted above.
+  if (useFixtureApps) await resetFixtureWindow(hostBundle);
+  await sendCompanion(socket, { action: 'workspace_transition_probe', name: 'return-completed' });
+  await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.window.presentation === 'expanded' && !state.window.awayFromHostSpace
+      && state.window.spaceMainAssignedSpaces.length === 1 && state;
+  }, 'fixture returns the interactive panel to its physical Space');
   await activate(awayBundle, 60000);
   const collapsing = (await sendCompanion(socket, { action: 'status' })).state;
-  assert.equal(collapsing.window.presentation, 'collapsed');
-  assert.equal(collapsing.window.presentationTransitioning, false);
-  assert.equal(collapsing.window.transitionContent, 'collapsed-icon');
+  assert.equal(collapsing.window.presentation, 'collapsing');
+  assert.equal(collapsing.window.presentationTransitioning, true,
+    'ordinary focus loss after the simulated Space roundtrip keeps the morph');
   const collapsed = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
     return state.visible && state.window.presentation === 'collapsed'
@@ -439,6 +488,9 @@ try {
   assert.equal(hostExpanded.window.transitionContent, 'full-content',
     'expanded content must appear only after the frame animation completes');
   assert.equal(hostExpanded.window.awayFromHostSpace, false);
+  assert.equal(hostExpanded.window.spaceMirrorVisible, false);
+  assert.equal(hostExpanded.window.spaceMainAssignedSpaces.length, 1,
+    'the interactive panel must return to exactly the Codex Space');
   assert.equal(hostExpanded.window.spaceOriginWasCollapsed, null,
     'returning to the Codex Space must consume the saved expanded state');
   await activate('local.taskplan.companion.prototype', 120000);
@@ -563,8 +615,10 @@ try {
     action: 'workspace_transition_probe',
   })).state;
   assert.equal(collapsedOrigin.window.spaceOriginWasCollapsed, true);
-  assert.equal(collapsedOrigin.window.spaceIconProxyVisible, false,
-    'an already compact host window must not need a transition proxy');
+  assert.equal(collapsedOrigin.window.spaceMirrorVisible, true);
+  assert.equal(collapsedOrigin.window.spaceMirrorPresentation, 'collapsed');
+  assert.equal(collapsedOrigin.window.spaceMirrorFrame.width, 52,
+    'a compact host Space must retain a compact mirror');
   await sendCompanion(socket, { action: 'workspace_transition_probe', name: 'departure-completed' });
   await sendCompanion(socket, { action: 'workspace_transition_probe', name: 'return-completed' });
   const collapsedRestored = await eventually(async () => {

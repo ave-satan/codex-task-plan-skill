@@ -111,6 +111,114 @@ struct WindowFrame: Codable {
     var width: Double
     var height: Double
 }
+
+final class SpaceWindowRouter {
+    typealias MainConnectionFn = @convention(c) () -> UInt32
+    typealias CopyManagedSpacesFn = @convention(c) (UInt32) -> Unmanaged<CFArray>?
+    typealias ActiveSpaceFn = @convention(c) (UInt32) -> UInt64
+    typealias CopyWindowSpacesFn = @convention(c) (UInt32, Int32, CFArray) -> Unmanaged<CFArray>?
+    typealias MutateWindowSpacesFn = @convention(c) (UInt32, CFArray, CFArray) -> Int32
+    typealias MoveWindowsToSpaceFn = @convention(c) (UInt32, CFArray, UInt64) -> Int32
+
+    private let handle: UnsafeMutableRawPointer
+    private let connection: UInt32
+    private let copyManagedSpaces: CopyManagedSpacesFn
+    private let activeSpaceFunction: ActiveSpaceFn
+    private let copyWindowSpaces: CopyWindowSpacesFn
+    private let addWindowsToSpaces: MutateWindowSpacesFn
+    private let removeWindowsFromSpaces: MutateWindowSpacesFn
+    private let moveWindowsToSpace: MoveWindowsToSpaceFn
+
+    init?() {
+        let path = "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight"
+        guard let handle = dlopen(path, RTLD_NOW),
+              let mainSymbol = dlsym(handle, "CGSMainConnectionID"),
+              let managedSymbol = dlsym(handle, "CGSCopyManagedDisplaySpaces"),
+              let activeSymbol = dlsym(handle, "CGSGetActiveSpace"),
+              let copySymbol = dlsym(handle, "CGSCopySpacesForWindows"),
+              let addSymbol = dlsym(handle, "CGSAddWindowsToSpaces"),
+              let removeSymbol = dlsym(handle, "CGSRemoveWindowsFromSpaces"),
+              let moveSymbol = dlsym(handle, "CGSMoveWindowsToManagedSpace") else {
+            return nil
+        }
+        self.handle = handle
+        let main = unsafeBitCast(mainSymbol, to: MainConnectionFn.self)
+        connection = main()
+        guard connection != 0 else { dlclose(handle); return nil }
+        copyManagedSpaces = unsafeBitCast(managedSymbol, to: CopyManagedSpacesFn.self)
+        activeSpaceFunction = unsafeBitCast(activeSymbol, to: ActiveSpaceFn.self)
+        copyWindowSpaces = unsafeBitCast(copySymbol, to: CopyWindowSpacesFn.self)
+        addWindowsToSpaces = unsafeBitCast(addSymbol, to: MutateWindowSpacesFn.self)
+        removeWindowsFromSpaces = unsafeBitCast(removeSymbol, to: MutateWindowSpacesFn.self)
+        moveWindowsToSpace = unsafeBitCast(moveSymbol, to: MoveWindowsToSpaceFn.self)
+    }
+
+    deinit { dlclose(handle) }
+
+    func activeSpace() -> UInt64? {
+        let value = activeSpaceFunction(connection)
+        return value == 0 ? nil : value
+    }
+
+    func spaces(for windowNumber: Int) -> [UInt64] {
+        let windows = [NSNumber(value: windowNumber)] as CFArray
+        guard let result = copyWindowSpaces(connection, 7, windows)?.takeRetainedValue() else { return [] }
+        return (result as NSArray).compactMap { ($0 as? NSNumber)?.uint64Value }
+    }
+
+    func displaySpaces(containing space: UInt64) -> [UInt64] {
+        guard let managed = copyManagedSpaces(connection)?.takeRetainedValue() else { return [] }
+        for case let display as NSDictionary in managed as NSArray {
+            guard let rawSpaces = display["Spaces"] as? NSArray else { continue }
+            let ids = rawSpaces.compactMap { item -> UInt64? in
+                guard let dictionary = item as? NSDictionary else { return nil }
+                return (dictionary["id64"] as? NSNumber)?.uint64Value
+                    ?? (dictionary["ManagedSpaceID"] as? NSNumber)?.uint64Value
+            }
+            if ids.contains(space) { return ids }
+        }
+        return []
+    }
+
+    @discardableResult func assign(windowNumber: Int, to targetSpaces: [UInt64]) -> Bool {
+        guard windowNumber > 0, !targetSpaces.isEmpty else { return false }
+        let windows = [NSNumber(value: windowNumber)] as CFArray
+        let orderedTarget = Array(NSOrderedSet(array: targetSpaces.map(NSNumber.init(value:))))
+            .compactMap { ($0 as? NSNumber)?.uint64Value }
+        guard let primarySpace = orderedTarget.first,
+              moveWindowsToSpace(connection, windows, primarySpace) == 0 else {
+            return false
+        }
+        if orderedTarget.count > 1 {
+            let additional = orderedTarget.dropFirst().map(NSNumber.init(value:)) as CFArray
+            guard addWindowsToSpaces(connection, windows, additional) == 0 else { return false }
+        }
+        let targetSet = Set(orderedTarget)
+        let unexpected = spaces(for: windowNumber).filter { !targetSet.contains($0) }
+        if !unexpected.isEmpty {
+            let staleSpaces = unexpected.map(NSNumber.init(value:)) as CFArray
+            guard removeWindowsFromSpaces(connection, windows, staleSpaces) == 0 else { return false }
+        }
+        return Set(spaces(for: windowNumber)) == targetSet
+    }
+
+    @discardableResult func assignVisibleWindow(windowNumber: Int, from hostSpace: UInt64,
+                                                to targetSpaces: [UInt64]) -> Bool {
+        guard windowNumber > 0, !targetSpaces.isEmpty else { return false }
+        let windows = [NSNumber(value: windowNumber)] as CFArray
+        let targetSet = Set(targetSpaces)
+        let target = targetSpaces.map(NSNumber.init(value:)) as CFArray
+        guard addWindowsToSpaces(connection, windows, target) == 0 else { return false }
+        var staleSet = Set(spaces(for: windowNumber)).subtracting(targetSet)
+        staleSet.insert(hostSpace)
+        if !staleSet.isEmpty {
+            let stale = staleSet.map(NSNumber.init(value:)) as CFArray
+            guard removeWindowsFromSpaces(connection, windows, stale) == 0 else { return false }
+        }
+        return Set(spaces(for: windowNumber)) == targetSet
+    }
+}
+
 struct Saved: Codable {
     var plans: [Plan]
     var selected: String?
@@ -873,6 +981,23 @@ struct CompanionRootView: View {
     }
 }
 
+final class SpaceMirrorState: ObservableObject {
+    @Published var collapsed = true
+}
+
+struct SpaceMirrorRootView: View {
+    @ObservedObject var store: Store
+    @ObservedObject var state: SpaceMirrorState
+
+    @ViewBuilder var body: some View {
+        if state.collapsed {
+            CollapsedPlanView(store: store)
+        } else {
+            PanelView(store: store)
+        }
+    }
+}
+
 struct PlanIconSwitcher: View {
     @ObservedObject var store: Store
 
@@ -1241,8 +1366,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let store = Store()
     var panel: PlanPanel!
     var hostView: PanelHostingView<CompanionRootView>!
-    var spaceIconPanel: PlanPanel!
-    var spaceIconHostView: PanelHostingView<CollapsedPlanView>!
+    let spaceRouter = SpaceWindowRouter()
+    let spaceMirrorState = SpaceMirrorState()
+    var spaceMirrorPanel: PlanPanel!
+    var spaceMirrorHostView: PanelHostingView<SpaceMirrorRootView>!
+    var spaceRemoteIconPanel: PlanPanel!
+    var spaceRemoteIconHostView: PanelHostingView<CollapsedPlanView>!
     var observers: [NSObjectProtocol] = []
     var localEventMonitor: Any?
     var dismissed = false
@@ -1293,7 +1422,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var spaceArrivalPending = false
     var awayFromHostSpace = false
     var spaceOriginWasCollapsed: Bool?
-    var spaceIconProxyVisible = false
+    var hostSpaceID: UInt64?
+    var spaceMirrorVisible = false
+    var spaceRemoteIconVisible = false
     var hostMinimizeBaseline: HostWindowObservation?
     var hostMinimizeCandidateSamples = 0
     var hostMinimizingActive = false
@@ -1382,7 +1513,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.title = "Task Plan Companion"
         panel.delegate = self; panel.isReleasedWhenClosed = false
         panel.level = .floating; panel.hidesOnDeactivate = false; panel.becomesKeyOnlyIfNeeded = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.collectionBehavior = [.fullScreenAuxiliary]
         panel.titleVisibility = .hidden; panel.titlebarAppearsTransparent = true
         panel.standardWindowButton(.closeButton)?.isHidden = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
@@ -1399,28 +1530,50 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         panel.contentView = hostView
         panel.enableCursorRects()
-        spaceIconPanel = PlanPanel(contentRect: NSRect(origin: .zero, size: collapsedSize),
-                                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        spaceIconPanel.title = "Task Plan Space Icon"
-        spaceIconPanel.isReleasedWhenClosed = false
-        spaceIconPanel.level = .floating
-        spaceIconPanel.hidesOnDeactivate = false
-        spaceIconPanel.becomesKeyOnlyIfNeeded = true
-        spaceIconPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        spaceIconPanel.isMovableByWindowBackground = false
-        spaceIconPanel.appearance = NSAppearance(named: .darkAqua)
-        spaceIconPanel.isOpaque = false
-        spaceIconPanel.hasShadow = false
-        spaceIconPanel.backgroundColor = .clear
-        spaceIconPanel.ignoresMouseEvents = true
-        spaceIconHostView = PanelHostingView(rootView: CollapsedPlanView(store: store))
-        spaceIconHostView.resizeEnabled = false
-        spaceIconHostView.windowDragEnabled = false
+        spaceMirrorPanel = PlanPanel(contentRect: NSRect(origin: .zero, size: collapsedSize),
+                                     styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        spaceMirrorPanel.title = "Task Plan Host Space Mirror"
+        spaceMirrorPanel.isReleasedWhenClosed = false
+        spaceMirrorPanel.level = .floating
+        spaceMirrorPanel.hidesOnDeactivate = false
+        spaceMirrorPanel.becomesKeyOnlyIfNeeded = true
+        spaceMirrorPanel.collectionBehavior = [.fullScreenAuxiliary]
+        spaceMirrorPanel.isMovableByWindowBackground = false
+        spaceMirrorPanel.appearance = NSAppearance(named: .darkAqua)
+        spaceMirrorPanel.isOpaque = false
+        spaceMirrorPanel.hasShadow = false
+        spaceMirrorPanel.backgroundColor = .clear
+        spaceMirrorPanel.ignoresMouseEvents = true
+        spaceMirrorHostView = PanelHostingView(rootView: SpaceMirrorRootView(store: store, state: spaceMirrorState))
+        spaceMirrorHostView.resizeEnabled = false
+        spaceMirrorHostView.windowDragEnabled = false
         if #available(macOS 13.0, *) {
-            spaceIconHostView.sizingOptions = []
+            spaceMirrorHostView.sizingOptions = []
         }
-        spaceIconPanel.contentView = spaceIconHostView
-        spaceIconPanel.orderOut(nil)
+        spaceMirrorPanel.contentView = spaceMirrorHostView
+        spaceMirrorPanel.orderOut(nil)
+        spaceRemoteIconPanel = PlanPanel(contentRect: NSRect(origin: .zero, size: collapsedSize),
+                                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        spaceRemoteIconPanel.title = "Task Plan Remote Space Icon"
+        spaceRemoteIconPanel.isReleasedWhenClosed = false
+        spaceRemoteIconPanel.level = .floating
+        spaceRemoteIconPanel.hidesOnDeactivate = false
+        spaceRemoteIconPanel.becomesKeyOnlyIfNeeded = true
+        spaceRemoteIconPanel.collectionBehavior = [.fullScreenAuxiliary, .stationary]
+        spaceRemoteIconPanel.isMovableByWindowBackground = false
+        spaceRemoteIconPanel.appearance = NSAppearance(named: .darkAqua)
+        spaceRemoteIconPanel.isOpaque = false
+        spaceRemoteIconPanel.hasShadow = false
+        spaceRemoteIconPanel.backgroundColor = .clear
+        spaceRemoteIconPanel.ignoresMouseEvents = true
+        spaceRemoteIconHostView = PanelHostingView(rootView: CollapsedPlanView(store: store))
+        spaceRemoteIconHostView.resizeEnabled = false
+        spaceRemoteIconHostView.windowDragEnabled = false
+        if #available(macOS 13.0, *) {
+            spaceRemoteIconHostView.sizingOptions = []
+        }
+        spaceRemoteIconPanel.contentView = spaceRemoteIconHostView
+        spaceRemoteIconPanel.orderOut(nil)
         cursorTimer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
             self?.syncPresentationAnimation()
             self?.syncHostLifecycle()
@@ -1493,7 +1646,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if hostActivated, self.spaceArrivalPending || self.awayFromHostSpace {
                 self.restoreHostSpacePresentation()
             } else if self.awayFromHostSpace {
-                self.panel.orderFrontRegardless()
+                self.syncPresentation()
             } else {
                 self.syncPresentation(hostDidActivate: hostActivated)
             }
@@ -1523,7 +1676,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             } else if self.spaceDepartureActive {
                 self.finishSpaceDeparture()
             } else if self.awayFromHostSpace {
-                self.panel.orderFrontRegardless()
+                self.syncPresentation()
             } else {
                 self.spaceArrivalPending = false
                 self.spaceDepartureActive = false
@@ -1621,6 +1774,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             didDrag = true
             panel.setFrameOrigin(NSPoint(x: initialFrame.minX + dx,
                                          y: initialFrame.minY + dy))
+        }
+        if didDrag, !spaceDepartureActive, !awayFromHostSpace,
+           NSWorkspace.shared.frontmostApplication?.bundleIdentifier == hostBundle {
+            _ = primeRemoteSpaceIcon()
         }
         return didDrag
     }
@@ -1862,6 +2019,44 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    func compactMainWindowForSpaceRouting() {
+        guard store.active != nil else { return }
+        guard !store.collapsed || collapsingToIcon || presentationTween != nil else {
+            panel.alphaValue = 0
+            return
+        }
+        let target = collapsedFrame ?? defaultCollapsedFrame()
+        collapsedFrame = target
+        if expandedFromIconSource != nil,
+           panel.frame.width >= expandedMinimumSize.width,
+           panel.frame.height >= expandedMinimumSize.height {
+            unfocusedExpandedFrame = panel.frame
+        }
+        presentationAnimationToken += 1
+        presentationTween = nil
+        applyingPresentationFrame = false
+        collapsingToIcon = false
+        expandedFromIconSource = nil
+        expandedMovedBeyondSource = false
+        expandedHoverExitStartedAt = nil
+        store.planSwitcherExpanded = false
+        store.hoveredPlanID = nil
+        store.collapsedHovered = false
+        store.transitionToCollapsed = false
+        store.transitionIconOnly = false
+        store.collapsed = true
+        planTooltip.hide(animated: false)
+        hostView.resizeEnabled = false
+        hostView.windowDragEnabled = true
+        panel.minSize = collapsedSize
+        panel.alphaValue = 0
+        panel.setFrame(target, display: false)
+        hostView.rootView = CompanionRootView(store: store)
+        hostView.layoutSubtreeIfNeeded()
+        panel.contentView?.displayIfNeeded()
+        try? persist()
+    }
+
     func expandForHost(animated: Bool = true) {
         guard store.active != nil else { panel.orderOut(nil); return }
         guard store.collapsed || collapsingToIcon else {
@@ -1958,29 +2153,94 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard focusCollapseEnabled, store.active != nil, !dismissed else { return }
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == hostBundle else { return }
         guard !spaceDepartureActive, !awayFromHostSpace else { return }
+        guard let spaceRouter, let currentSpace = spaceRouter.activeSpace() else {
+            journal("space_routing_unavailable")
+            return
+        }
+        let displaySpaces = spaceRouter.displaySpaces(containing: currentSpace)
+        let nonHostSpaces = displaySpaces.filter { $0 != currentSpace }
+        guard !nonHostSpaces.isEmpty else { return }
+        let remoteIconReady = primeRemoteSpaceIcon(hostSpace: currentSpace)
         workspaceGestureGeneration += 1
         spaceOriginWasCollapsed = store.collapsed
+        hostSpaceID = currentSpace
         spaceDepartureActive = true
         spaceArrivalPending = false
         lastEarlyPresentationSignal = "host-window-motion-leaving"
         lastEarlyPresentationSignalAt = Date()
-        if store.collapsed {
-            panel.orderFrontRegardless()
-        } else {
-            let target = collapsedFrame ?? defaultCollapsedFrame()
-            collapsedFrame = target
-            spaceIconPanel.setFrame(target, display: true)
-            spaceIconPanel.alphaValue = 0.82
-            spaceIconPanel.orderFrontRegardless()
-            spaceIconProxyVisible = true
-            panel.orderOut(nil)
+        spaceMirrorState.collapsed = store.collapsed
+        spaceMirrorPanel.setFrame(panel.frame, display: true)
+        spaceMirrorPanel.alphaValue = panel.alphaValue
+        spaceMirrorPanel.orderFrontRegardless()
+        guard spaceRouter.assign(windowNumber: spaceMirrorPanel.windowNumber, to: [currentSpace]) else {
+            spaceDepartureActive = false
+            spaceOriginWasCollapsed = nil
+            hostSpaceID = nil
+            spaceMirrorPanel.orderOut(nil)
+            journal("space_routing_failed")
+            return
         }
+        spaceMirrorVisible = true
+        compactMainWindowForSpaceRouting()
+        guard spaceRouter.assign(windowNumber: panel.windowNumber, to: nonHostSpaces) else {
+            spaceDepartureActive = false
+            spaceOriginWasCollapsed = nil
+            hostSpaceID = nil
+            hideSpaceMirror()
+            syncPresentation()
+            journal("space_routing_failed")
+            return
+        }
+        panel.alphaValue = remoteIconReady ? 0 : 0.82
         journal("space_departure_started")
     }
 
-    func hideSpaceIconProxy() {
-        spaceIconPanel?.orderOut(nil)
-        spaceIconProxyVisible = false
+    func hideSpaceMirror() {
+        spaceMirrorPanel?.orderOut(nil)
+        spaceMirrorVisible = false
+    }
+
+    func hideRemoteSpaceIcon() {
+        spaceRemoteIconPanel?.orderOut(nil)
+        spaceRemoteIconVisible = false
+    }
+
+    @discardableResult func primeRemoteSpaceIcon(hostSpace explicitHostSpace: UInt64? = nil) -> Bool {
+        guard focusCollapseEnabled, store.active != nil, !dismissed,
+              let spaceRouter,
+              let hostSpace = explicitHostSpace ?? spaceRouter.activeSpace() else {
+            hideRemoteSpaceIcon()
+            return false
+        }
+        let remoteSpaces = spaceRouter.displaySpaces(containing: hostSpace).filter { $0 != hostSpace }
+        guard !remoteSpaces.isEmpty else {
+            hideRemoteSpaceIcon()
+            return false
+        }
+        let targetSet = Set(remoteSpaces)
+        let assignedSet = Set(spaceRouter.spaces(for: spaceRemoteIconPanel.windowNumber))
+        let targetFrame = collapsedFrame ?? defaultCollapsedFrame()
+        if spaceRemoteIconVisible, assignedSet == targetSet,
+           spaceRemoteIconPanel.frame.equalTo(targetFrame) {
+            return true
+        }
+        spaceRemoteIconPanel.alphaValue = 0
+        spaceRemoteIconPanel.setFrame(targetFrame, display: false)
+        spaceRemoteIconHostView.rootView = CollapsedPlanView(store: store)
+        spaceRemoteIconHostView.layoutSubtreeIfNeeded()
+        spaceRemoteIconPanel.contentView?.displayIfNeeded()
+        spaceRemoteIconPanel.orderFrontRegardless()
+        guard spaceRouter.assignVisibleWindow(windowNumber: spaceRemoteIconPanel.windowNumber,
+                                              from: hostSpace, to: remoteSpaces),
+              spaceRouter.activeSpace() == hostSpace else {
+            hideRemoteSpaceIcon()
+            journal("space_remote_icon_routing_failed")
+            return false
+        }
+        spaceRemoteIconPanel.alphaValue = 0.82
+        spaceRemoteIconVisible = true
+        journal("space_remote_icon_primed")
+        return true
     }
 
     func finishSpaceDeparture() {
@@ -1988,18 +2248,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         spaceDepartureActive = false
         awayFromHostSpace = true
         spaceArrivalPending = false
-        if !store.collapsed {
-            panel.alphaValue = 0
-            collapseToIcon(animated: false)
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.hideSpaceIconProxy()
-                self.panel.orderFrontRegardless()
-            }
-        } else {
-            hideSpaceIconProxy()
-            panel.orderFrontRegardless()
-        }
+        panel.alphaValue = 0.82
+        panel.orderFrontRegardless()
+        hideRemoteSpaceIcon()
         journal("space_departure_finished")
     }
 
@@ -2009,24 +2260,35 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         spaceDepartureActive = false
         spaceArrivalPending = false
         awayFromHostSpace = false
-        spaceOriginWasCollapsed = nil
         earlyHostDepartureBaseline = nil
         earlyHostDepartureReturnSamples = 0
-        hideSpaceIconProxy()
-        panel.alphaValue = store.collapsed ? 0.82 : 1
-        panel.orderFrontRegardless()
-        journal("space_departure_cancelled")
+        restoreHostSpacePresentation(event: "space_departure_cancelled")
     }
 
-    func restoreHostSpacePresentation() {
+    func restoreHostSpacePresentation(event: String? = nil) {
         let restoreCollapsed = spaceOriginWasCollapsed ?? false
+        guard let hostSpaceID, let spaceRouter else {
+            spaceArrivalPending = false
+            spaceDepartureActive = false
+            awayFromHostSpace = false
+            spaceOriginWasCollapsed = nil
+            hideSpaceMirror()
+            syncPresentation()
+            journal("space_restore_routing_unavailable")
+            return
+        }
         spaceArrivalPending = false
         spaceDepartureActive = false
         awayFromHostSpace = false
-        spaceOriginWasCollapsed = nil
         earlyHostDepartureBaseline = nil
         earlyHostDepartureReturnSamples = 0
-        hideSpaceIconProxy()
+        panel.alphaValue = 0
+        guard spaceRouter.assign(windowNumber: panel.windowNumber, to: [hostSpaceID]) else {
+            panel.alphaValue = store.collapsed ? 0.82 : 1
+            panel.orderFrontRegardless()
+            journal("space_restore_routing_failed")
+            return
+        }
         if restoreCollapsed {
             if store.collapsed {
                 panel.alphaValue = 0.82
@@ -2040,7 +2302,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             panel.alphaValue = 1
             panel.orderFrontRegardless()
         }
-        journal(restoreCollapsed ? "space_arrival_restored_collapsed" : "space_arrival_restored_expanded")
+        _ = primeRemoteSpaceIcon(hostSpace: hostSpaceID)
+        spaceOriginWasCollapsed = nil
+        self.hostSpaceID = nil
+        DispatchQueue.main.async { [weak self] in self?.hideSpaceMirror() }
+        journal(event ?? (restoreCollapsed ? "space_arrival_restored_collapsed" : "space_arrival_restored_expanded"))
     }
 
     func beginHostMinimize(from baseline: HostWindowObservation, trigger: String) {
@@ -2115,6 +2381,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func syncWorkspaceWindowMotion() {
         guard panel != nil, focusCollapseEnabled, store.active != nil, !dismissed else {
+            if let hostSpaceID, let spaceRouter, panel != nil {
+                _ = spaceRouter.assign(windowNumber: panel.windowNumber, to: [hostSpaceID])
+            }
             hostWindowObservationInitialized = false
             lastHostWindowObservation = nil
             earlyHostDepartureBaseline = nil
@@ -2127,7 +2396,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             spaceArrivalPending = false
             awayFromHostSpace = false
             spaceOriginWasCollapsed = nil
-            hideSpaceIconProxy()
+            hostSpaceID = nil
+            hideSpaceMirror()
+            hideRemoteSpaceIcon()
             return
         }
         let now = Date()
@@ -2232,23 +2503,23 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         guard store.active != nil, !dismissed else {
-            hideSpaceIconProxy()
+            hideSpaceMirror()
+            hideRemoteSpaceIcon()
             panel.orderOut(nil)
             if lastVisibility != false { lastVisibility = false; journal("visibility") }
             return
         }
         if spaceDepartureActive {
-            if spaceIconProxyVisible { spaceIconPanel.orderFrontRegardless() }
-            panel.orderOut(nil)
             return
         }
         if awayFromHostSpace {
-            hideSpaceIconProxy()
+            panel.alphaValue = 0.82
             panel.orderFrontRegardless()
             return
         }
         let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         if !focusCollapseEnabled {
+            hideRemoteSpaceIcon()
             let companion = Bundle.main.bundleIdentifier
             let visible = front == hostBundle || front == companion
             store.collapsed = false
@@ -2263,6 +2534,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let companion = Bundle.main.bundleIdentifier
         if front == hostBundle {
             expandForHost(animated: store.collapsed)
+            _ = primeRemoteSpaceIcon()
         } else if expandedFromIconSource != nil {
             hostView.resizeEnabled = false
             panel.orderFrontRegardless()
@@ -2642,17 +2914,34 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "completedPlanRetentionSeconds": retentionSeconds,
                                      "focusCollapseEnabled": focusCollapseEnabled,
                                      "hostLifecycle": "workspace-termination-observer-with-750ms-running-app-fallback",
-                                     "workspaceTransitionBehavior": "fixed-size-proxy-during-space-preserve-host-state",
+                                     "workspaceTransitionBehavior": "preloaded-remote-icon-with-host-mirror",
                                      "workspaceWindowMotionPollingHz": 30,
                                      "spaceDepartureActive": spaceDepartureActive,
                                      "spaceArrivalPending": spaceArrivalPending,
                                      "awayFromHostSpace": awayFromHostSpace,
                                      "spaceOriginWasCollapsed": spaceOriginWasCollapsed ?? NSNull(),
-                                     "spaceIconProxyVisible": spaceIconProxyVisible,
-                                     "spaceIconProxyFrame": spaceIconPanel.map {
+                                     "spaceRoutingAvailable": spaceRouter != nil,
+                                     "hostSpaceID": hostSpaceID ?? NSNull(),
+                                     "spaceMirrorVisible": spaceMirrorVisible,
+                                     "spaceMirrorPresentation": spaceMirrorState.collapsed ? "collapsed" : "expanded",
+                                     "spaceMirrorFrame": spaceMirrorPanel.map {
                                         ["x": $0.frame.minX, "y": $0.frame.minY,
                                          "width": $0.frame.width, "height": $0.frame.height]
                                      } ?? NSNull(),
+                                     "spaceMainAssignedSpaces": panel.flatMap { panel in
+                                        spaceRouter?.spaces(for: panel.windowNumber)
+                                     } ?? [],
+                                     "spaceMirrorAssignedSpaces": spaceMirrorPanel.flatMap { mirror in
+                                        spaceRouter?.spaces(for: mirror.windowNumber)
+                                     } ?? [],
+                                     "spaceRemoteIconVisible": spaceRemoteIconVisible,
+                                     "spaceRemoteIconFrame": spaceRemoteIconPanel.map {
+                                        ["x": $0.frame.minX, "y": $0.frame.minY,
+                                         "width": $0.frame.width, "height": $0.frame.height]
+                                     } ?? NSNull(),
+                                     "spaceRemoteIconAssignedSpaces": spaceRemoteIconPanel.flatMap { remote in
+                                        spaceRouter?.spaces(for: remote.windowNumber)
+                                     } ?? [],
                                      "hostMinimizeDetection": "window-server-two-frame-proportional-shrink",
                                      "lastHostMinimizeTrigger": lastHostMinimizeTrigger ?? NSNull(),
                                      "hostMinimizingActive": hostMinimizingActive,
