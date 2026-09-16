@@ -344,15 +344,19 @@ try {
 
   if (useFixtureApps) {
     await moveFixtureWindow(hostBundle, true);
-    await eventually(async () => {
+    const cancelledDeparture = await eventually(async () => {
       const state = (await sendCompanion(socket, { action: 'status' })).state;
       return state.window.lastEarlyPresentationSignal === 'host-window-motion-leaving'
-        && state.window.presentation === 'collapsed' && !state.window.presentationTransitioning && state;
-    }, 'cancelled Space motion shows the icon without a morph');
+        && state.window.spaceIconProxyVisible && !state.visible
+        && state.window.presentation === 'expanded' && state;
+    }, 'cancelled Space motion uses a fixed-size proxy without resizing the host window');
+    assert.equal(cancelledDeparture.window.spaceIconProxyFrame.width, 52);
+    assert.equal(cancelledDeparture.window.spaceIconProxyFrame.height, 52);
+    assert.equal(cancelledDeparture.window.spaceOriginWasCollapsed, false);
     const recovered = await eventually(async () => {
       const state = (await sendCompanion(socket, { action: 'status' })).state;
       return state.frontmostBundle === hostBundle && state.window.presentation === 'expanded'
-        && !state.window.presentationTransitioning && state;
+        && !state.window.presentationTransitioning && !state.window.spaceIconProxyVisible && state;
     }, 'cancelled WindowServer motion restores expanded host plan');
     assert.equal(recovered.window.resizable, true);
   }
@@ -361,16 +365,28 @@ try {
   else await sendCompanion(socket, { action: 'workspace_transition_probe' });
   const earlyTransition = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
-    return state.window.presentation === 'collapsed' && state;
-  }, 'WindowServer host-window motion switches to the icon');
-  assert.equal(earlyTransition.window.presentation, 'collapsed');
+    return state.window.spaceIconProxyVisible && !state.visible
+      && state.window.presentation === 'expanded' && state;
+  }, 'WindowServer host-window motion shows the stable icon proxy');
+  assert.equal(earlyTransition.window.presentation, 'expanded',
+    'the host-Space presentation state must not change while the Space gesture is running');
   assert.equal(earlyTransition.window.presentationTransitioning, false,
     'Space departure must not run the focus morph');
   assert.equal(earlyTransition.window.lastEarlyPresentationSignal, 'host-window-motion-leaving');
   assert.equal(earlyTransition.window.workspaceTransitionBehavior,
-    'instant-icon-on-space-focus-morph-on-same-space');
+    'fixed-size-proxy-during-space-preserve-host-state');
   assert.equal(earlyTransition.window.workspaceWindowMotionPollingHz, 30);
-  assert.equal(earlyTransition.window.width, 52);
+  assert.equal(earlyTransition.window.spaceIconProxyFrame.width, 52);
+  assert.equal(earlyTransition.window.spaceIconProxyFrame.height, 52);
+  assert.equal(earlyTransition.window.spaceOriginWasCollapsed, false);
+
+  await sendCompanion(socket, { action: 'workspace_transition_probe', name: 'departure-completed' });
+  const departed = await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.window.awayFromHostSpace && state.window.presentation === 'collapsed'
+      && !state.window.spaceIconProxyVisible && state;
+  }, 'completed Space departure hands off to the normal interactive compact icon');
+  assert.equal(departed.window.width, 52);
 
   await activate(awayBundle, 60000);
   const collapsing = (await sendCompanion(socket, { action: 'status' })).state;
@@ -422,6 +438,9 @@ try {
   const hostExpanded = (await sendCompanion(socket, { action: 'status' })).state;
   assert.equal(hostExpanded.window.transitionContent, 'full-content',
     'expanded content must appear only after the frame animation completes');
+  assert.equal(hostExpanded.window.awayFromHostSpace, false);
+  assert.equal(hostExpanded.window.spaceOriginWasCollapsed, null,
+    'returning to the Codex Space must consume the saved expanded state');
   await activate('local.taskplan.companion.prototype', 120000);
   const companionFocused = (await sendCompanion(socket, { action: 'status' })).state;
   assert.equal(companionFocused.window.presentation, 'expanded', 'companion self-focus must not collapse the host window');
@@ -534,6 +553,27 @@ try {
   }, 'expanded plan click focuses host and restores focused position');
   assert.deepEqual(focusedAgain.unfocusedExpandedWindowFrame, movedUnfocused.unfocusedExpandedWindowFrame,
     'restoring the focused frame must preserve the independent unfocused frame');
+
+  await sendCompanion(socket, { action: 'workspace_transition_probe', name: 'focus-leaving' });
+  await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.window.presentation === 'collapsed' && !state.window.presentationTransitioning && state;
+  }, 'diagnostic collapse before collapsed-origin Space test');
+  const collapsedOrigin = (await sendCompanion(socket, {
+    action: 'workspace_transition_probe',
+  })).state;
+  assert.equal(collapsedOrigin.window.spaceOriginWasCollapsed, true);
+  assert.equal(collapsedOrigin.window.spaceIconProxyVisible, false,
+    'an already compact host window must not need a transition proxy');
+  await sendCompanion(socket, { action: 'workspace_transition_probe', name: 'departure-completed' });
+  await sendCompanion(socket, { action: 'workspace_transition_probe', name: 'return-completed' });
+  const collapsedRestored = await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return !state.window.awayFromHostSpace && state.window.presentation === 'collapsed'
+      && !state.window.presentationTransitioning && state;
+  }, 'collapsed host-Space state survives a complete Space roundtrip');
+  assert.equal(collapsedRestored.window.width, 52);
+  assert.equal(collapsedRestored.window.spaceOriginWasCollapsed, null);
 
   await sendCompanion(socket, { action: 'remove', id: 'plan-1' });
   await sendCompanion(socket, { action: 'remove', id: 'plan-2' });

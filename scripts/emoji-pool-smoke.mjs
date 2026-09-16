@@ -11,12 +11,13 @@ const emoji = [...block.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)]
 assert.equal(emoji.length, 150, 'pool must contain exactly 150 emoji');
 assert.equal(new Set(emoji).size, 150, 'every plan emoji must be unique');
 
-for (const required of ['🫠', '🤪', '🤡', '💩', '👹', '🦧', '🪿', '🪳', '🧌', '🗿', '🛸', '🪠', '🍆', '🫙']) {
+for (const required of ['🫠', '🤪', '💩', '👹', '🦧', '🪿', '🪳', '🧌', '🗿', '🛸', '🪠', '🫦', '🦠', '🪦', '🧲', '🍆', '🫙']) {
   assert.ok(emoji.includes(required), `missing chaos emoji ${required}`);
 }
 
-for (const boring of ['📁', '💡', '🚀', '✅', '📌', '🏆', '👑']) {
-  assert.ok(!emoji.includes(boring), `boring emoji slipped back in: ${boring}`);
+for (const excluded of ['🤡', '🥳', '🪩', '🧨', '🪅', '🎪', '🎭', '🃏', '🎃', '🎉', '🎊', '🎈', '🎁', '🍾',
+  '📁', '💡', '🚀', '✅', '📌', '🏆', '👑']) {
+  assert.ok(!emoji.includes(excluded), `excluded emoji slipped back in: ${excluded}`);
 }
 
 console.log(`emoji-pool-smoke: ok (${emoji.length} unique chaos emoji)`);

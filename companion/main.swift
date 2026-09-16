@@ -30,19 +30,20 @@ struct Plan: Codable, Identifiable {
 }
 
 private let planEmojiPool = [
-    "🫠","🫨","🥴","🤪","🫥","🫣","🫡","🤠","🥸","🤡",
-    "👹","👺","👻","👽","👾","🤖","💩","😈","👿","☠️",
-    "💀","🤯","🤤","🤓","🧐","🥶","🥵","🤢","🤮","🤧",
-    "🤑","🤬","😵‍💫","😵","🫢","🤭","🥳","🥹","😶‍🌫️","😬",
+    "🫠","🫨","🥴","🤪","🫥","🫣","🥸","👹","👺","👻",
+    "👽","👾","🤖","💩","😈","👿","☠️","💀","🤯","🤤",
+    "🤓","🧐","🥶","🥵","🤢","🤮","🤧","🤬","😵‍💫","😵",
+    "😶‍🌫️","😬","🙃","🤐","🫤",
     "🐙","🦑","🪼","🦀","🦞","🦐","🐡","🦈","🐊","🦎",
     "🐍","🐲","🐉","🦖","🦕","🦧","🦍","🦥","🦦","🦨",
     "🦡","🦔","🐀","🐿️","🦇","🦉","🦤","🦚","🦩","🪿",
     "🐓","🦃","🦆","🐸","🐌","🪲","🪳","🕷️","🦂","🦗",
     "🐛","🐝","🪰","🦟","🪱","🐗","🐐","🦙","🦒","🦛",
-    "🍄","🌵","🪴","🧌","🗿","🎃","🧠","🫀","🫁","🦷",
-    "🦴","👁️","👀","👅","🦾","🦿","🧿","🔮","🪩","🧨",
-    "🧯","🪤","🧪","🧫","🧬","🩻","🛸","🛰️","🚽","🪠",
-    "🧻","🛒","🧹","🪣","🪅","🎪","🎭","🃏","🧸","🪆",
+    "🦘","🦣","🦬","🐫","🦏","🦫","🦭","🦠","🪸","🐚",
+    "🍄","🌵","🪴","🧌","🗿","🧠","🫀","🫁","🦷","🦴",
+    "👁️","👀","👅","🫦","🦾","🦿","🧿","🔮","🪤","🧪",
+    "🧫","🧬","🩻","🛸","🛰️","🚽","🪠","🧻","🛒","🧹",
+    "🪣","🪆","⚰️","🪦","🧲",
     "🍆","🍑","🌽","🥒","🫑","🧄","🧅","🥦","🥬","🥥",
     "🥝","🥨","🧀","🧇","🥓","🍤","🦪","🍥","🧋","🫙"
 ]
@@ -1240,6 +1241,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let store = Store()
     var panel: PlanPanel!
     var hostView: PanelHostingView<CompanionRootView>!
+    var spaceIconPanel: PlanPanel!
+    var spaceIconHostView: PanelHostingView<CollapsedPlanView>!
     var observers: [NSObjectProtocol] = []
     var localEventMonitor: Any?
     var dismissed = false
@@ -1288,6 +1291,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var earlyHostDepartureReturnSamples = 0
     var spaceDepartureActive = false
     var spaceArrivalPending = false
+    var awayFromHostSpace = false
+    var spaceOriginWasCollapsed: Bool?
+    var spaceIconProxyVisible = false
     var hostMinimizeBaseline: HostWindowObservation?
     var hostMinimizeCandidateSamples = 0
     var hostMinimizingActive = false
@@ -1393,6 +1399,28 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         panel.contentView = hostView
         panel.enableCursorRects()
+        spaceIconPanel = PlanPanel(contentRect: NSRect(origin: .zero, size: collapsedSize),
+                                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        spaceIconPanel.title = "Task Plan Space Icon"
+        spaceIconPanel.isReleasedWhenClosed = false
+        spaceIconPanel.level = .floating
+        spaceIconPanel.hidesOnDeactivate = false
+        spaceIconPanel.becomesKeyOnlyIfNeeded = true
+        spaceIconPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        spaceIconPanel.isMovableByWindowBackground = false
+        spaceIconPanel.appearance = NSAppearance(named: .darkAqua)
+        spaceIconPanel.isOpaque = false
+        spaceIconPanel.hasShadow = false
+        spaceIconPanel.backgroundColor = .clear
+        spaceIconPanel.ignoresMouseEvents = true
+        spaceIconHostView = PanelHostingView(rootView: CollapsedPlanView(store: store))
+        spaceIconHostView.resizeEnabled = false
+        spaceIconHostView.windowDragEnabled = false
+        if #available(macOS 13.0, *) {
+            spaceIconHostView.sizingOptions = []
+        }
+        spaceIconPanel.contentView = spaceIconHostView
+        spaceIconPanel.orderOut(nil)
         cursorTimer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
             self?.syncPresentationAnimation()
             self?.syncHostLifecycle()
@@ -1462,11 +1490,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return }
             self.workspaceGestureGeneration += 1
             let hostActivated = app?.bundleIdentifier == self.hostBundle
-            if hostActivated, self.spaceArrivalPending {
-                self.spaceArrivalPending = false
-                self.spaceDepartureActive = false
-                self.expandForHost(animated: false)
-                self.journal("space_arrival_expanded")
+            if hostActivated, self.spaceArrivalPending || self.awayFromHostSpace {
+                self.restoreHostSpacePresentation()
+            } else if self.awayFromHostSpace {
+                self.panel.orderFrontRegardless()
             } else {
                 self.syncPresentation(hostDidActivate: hostActivated)
             }
@@ -1479,7 +1506,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async { [weak self] in
                 guard let self,
                       NSWorkspace.shared.frontmostApplication?.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
-                if self.spaceDepartureActive {
+                if self.spaceDepartureActive || self.awayFromHostSpace {
                     self.journal("space_departure_settled")
                 } else {
                     self.beginEarlyPresentationTransition(source: "host-deactivated", requireHostFrontmost: false)
@@ -1490,12 +1517,13 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                              object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             self.workspaceGestureGeneration += 1
-            if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == self.hostBundle,
-               self.spaceArrivalPending {
-                self.spaceArrivalPending = false
-                self.spaceDepartureActive = false
-                self.expandForHost(animated: false)
-                self.journal("space_arrival_expanded")
+            let hostIsFrontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == self.hostBundle
+            if hostIsFrontmost, self.spaceArrivalPending || self.awayFromHostSpace {
+                self.restoreHostSpacePresentation()
+            } else if self.spaceDepartureActive {
+                self.finishSpaceDeparture()
+            } else if self.awayFromHostSpace {
+                self.panel.orderFrontRegardless()
             } else {
                 self.spaceArrivalPending = false
                 self.spaceDepartureActive = false
@@ -1929,13 +1957,90 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func beginSpaceDeparture() {
         guard focusCollapseEnabled, store.active != nil, !dismissed else { return }
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == hostBundle else { return }
+        guard !spaceDepartureActive, !awayFromHostSpace else { return }
         workspaceGestureGeneration += 1
+        spaceOriginWasCollapsed = store.collapsed
         spaceDepartureActive = true
         spaceArrivalPending = false
         lastEarlyPresentationSignal = "host-window-motion-leaving"
         lastEarlyPresentationSignalAt = Date()
-        collapseToIcon(animated: false)
-        journal("space_departure_collapsed")
+        if store.collapsed {
+            panel.orderFrontRegardless()
+        } else {
+            let target = collapsedFrame ?? defaultCollapsedFrame()
+            collapsedFrame = target
+            spaceIconPanel.setFrame(target, display: true)
+            spaceIconPanel.alphaValue = 0.82
+            spaceIconPanel.orderFrontRegardless()
+            spaceIconProxyVisible = true
+            panel.orderOut(nil)
+        }
+        journal("space_departure_started")
+    }
+
+    func hideSpaceIconProxy() {
+        spaceIconPanel?.orderOut(nil)
+        spaceIconProxyVisible = false
+    }
+
+    func finishSpaceDeparture() {
+        guard spaceDepartureActive else { return }
+        spaceDepartureActive = false
+        awayFromHostSpace = true
+        spaceArrivalPending = false
+        if !store.collapsed {
+            panel.alphaValue = 0
+            collapseToIcon(animated: false)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.hideSpaceIconProxy()
+                self.panel.orderFrontRegardless()
+            }
+        } else {
+            hideSpaceIconProxy()
+            panel.orderFrontRegardless()
+        }
+        journal("space_departure_finished")
+    }
+
+    func cancelSpaceDeparture() {
+        guard spaceDepartureActive else { return }
+        workspaceGestureGeneration += 1
+        spaceDepartureActive = false
+        spaceArrivalPending = false
+        awayFromHostSpace = false
+        spaceOriginWasCollapsed = nil
+        earlyHostDepartureBaseline = nil
+        earlyHostDepartureReturnSamples = 0
+        hideSpaceIconProxy()
+        panel.alphaValue = store.collapsed ? 0.82 : 1
+        panel.orderFrontRegardless()
+        journal("space_departure_cancelled")
+    }
+
+    func restoreHostSpacePresentation() {
+        let restoreCollapsed = spaceOriginWasCollapsed ?? false
+        spaceArrivalPending = false
+        spaceDepartureActive = false
+        awayFromHostSpace = false
+        spaceOriginWasCollapsed = nil
+        earlyHostDepartureBaseline = nil
+        earlyHostDepartureReturnSamples = 0
+        hideSpaceIconProxy()
+        if restoreCollapsed {
+            if store.collapsed {
+                panel.alphaValue = 0.82
+                panel.orderFrontRegardless()
+            } else {
+                collapseToIcon(animated: false)
+            }
+        } else if store.collapsed || collapsingToIcon {
+            expandForHost(animated: false)
+        } else {
+            panel.alphaValue = 1
+            panel.orderFrontRegardless()
+        }
+        journal(restoreCollapsed ? "space_arrival_restored_collapsed" : "space_arrival_restored_expanded")
     }
 
     func beginHostMinimize(from baseline: HostWindowObservation, trigger: String) {
@@ -2018,6 +2123,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             hostMinimizeCandidateSamples = 0
             hostMinimizingActive = false
             hostWindowMinimized = false
+            spaceDepartureActive = false
+            spaceArrivalPending = false
+            awayFromHostSpace = false
+            spaceOriginWasCollapsed = nil
+            hideSpaceIconProxy()
             return
         }
         let now = Date()
@@ -2083,25 +2193,30 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             hostMinimizeCandidateSamples = 0
             hostMinimizeBaseline = nil
+        }
+
+        if front == hostBundle, !spaceDepartureActive, !awayFromHostSpace,
+           NSEvent.pressedMouseButtons & 1 == 0,
+           let previous = lastHostWindowObservation, let current,
+           previous.id == current.id {
             let deltaX = current.frame.minX - previous.frame.minX
             let deltaY = current.frame.minY - previous.frame.minY
             if abs(deltaX) >= 8, abs(deltaX) > abs(deltaY) * 2 {
                 earlyHostDepartureBaseline = previous
                 earlyHostDepartureReturnSamples = 0
                 beginSpaceDeparture()
+                return
             }
-        } else if front == hostBundle, store.collapsed,
-                  lastEarlyPresentationSignal == "host-window-motion-leaving",
-                  hostWindowReturnedToDepartureBaseline(current) {
-            workspaceGestureGeneration += 1
-            spaceDepartureActive = false
-            earlyHostDepartureBaseline = nil
-            earlyHostDepartureReturnSamples = 0
-            expandForHost(animated: false)
-            journal("space_departure_cancelled")
-        } else if front != hostBundle, store.collapsed,
-                  lastHostWindowObservation == nil, let current,
-                  hostWindowIsMeaningfullyVisible(current) {
+        }
+
+        if front == hostBundle, spaceDepartureActive,
+           hostWindowReturnedToDepartureBaseline(current) {
+            cancelSpaceDeparture()
+            return
+        }
+        if front != hostBundle, awayFromHostSpace,
+           lastHostWindowObservation == nil, let current,
+           hostWindowIsMeaningfullyVisible(current) {
             noteSpaceArrival()
         } else if front != hostBundle, spaceArrivalPending, current == nil {
             spaceArrivalPending = false
@@ -2117,8 +2232,19 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         guard store.active != nil, !dismissed else {
+            hideSpaceIconProxy()
             panel.orderOut(nil)
             if lastVisibility != false { lastVisibility = false; journal("visibility") }
+            return
+        }
+        if spaceDepartureActive {
+            if spaceIconProxyVisible { spaceIconPanel.orderFrontRegardless() }
+            panel.orderOut(nil)
+            return
+        }
+        if awayFromHostSpace {
+            hideSpaceIconProxy()
+            panel.orderFrontRegardless()
             return
         }
         let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
@@ -2516,10 +2642,17 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "completedPlanRetentionSeconds": retentionSeconds,
                                      "focusCollapseEnabled": focusCollapseEnabled,
                                      "hostLifecycle": "workspace-termination-observer-with-750ms-running-app-fallback",
-                                     "workspaceTransitionBehavior": "instant-icon-on-space-focus-morph-on-same-space",
+                                     "workspaceTransitionBehavior": "fixed-size-proxy-during-space-preserve-host-state",
                                      "workspaceWindowMotionPollingHz": 30,
                                      "spaceDepartureActive": spaceDepartureActive,
                                      "spaceArrivalPending": spaceArrivalPending,
+                                     "awayFromHostSpace": awayFromHostSpace,
+                                     "spaceOriginWasCollapsed": spaceOriginWasCollapsed ?? NSNull(),
+                                     "spaceIconProxyVisible": spaceIconProxyVisible,
+                                     "spaceIconProxyFrame": spaceIconPanel.map {
+                                        ["x": $0.frame.minX, "y": $0.frame.minY,
+                                         "width": $0.frame.width, "height": $0.frame.height]
+                                     } ?? NSNull(),
                                      "hostMinimizeDetection": "window-server-two-frame-proportional-shrink",
                                      "lastHostMinimizeTrigger": lastHostMinimizeTrigger ?? NSNull(),
                                      "hostMinimizingActive": hostMinimizingActive,
@@ -2663,6 +2796,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             case "workspace_transition_probe":
                 if command.name == "arriving" {
                     noteSpaceArrival()
+                } else if command.name == "departure-completed" {
+                    finishSpaceDeparture()
+                } else if command.name == "return-completed" {
+                    restoreHostSpacePresentation()
                 } else if command.name == "focus-leaving" {
                     beginEarlyPresentationTransition(source: "host-deactivated")
                 } else {
