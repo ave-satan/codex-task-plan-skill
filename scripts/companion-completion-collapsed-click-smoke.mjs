@@ -7,6 +7,7 @@ import { sendCompanion } from '../companion-bridge.mjs';
 
 const binary = process.env.COMPANION_BINARY;
 assert.ok(binary, 'Set COMPANION_BINARY to the built native companion');
+const hostBundle = process.env.COMPLETION_HOST_BUNDLE ?? 'com.openai.codex';
 const fixture = await mkdtemp('/tmp/taskplan-completed-collapsed-click-');
 const socket = join(fixture, 'control.sock');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -24,18 +25,33 @@ const app = spawn(binary, [], { env: {
   ...process.env,
   PLAN_COMPANION_DATA: fixture,
   PLAN_COMPANION_SOCKET: socket,
-  PLAN_COMPANION_HOST: 'local.taskplan.hidden-host',
+  PLAN_COMPANION_HOST: hostBundle,
   PLAN_COMPANION_RETENTION_SECONDS: '15',
 }, stdio: ['ignore', 'pipe', 'pipe'] });
 
 try {
   await eventually(async () => (await sendCompanion(socket, { action: 'status' })).ok);
+  const activator = spawn('/usr/bin/swift', ['-e', `
+import AppKit
+import Darwin
+NSRunningApplication.runningApplications(withBundleIdentifier: "${hostBundle}").first?
+  .activate(options: [.activateIgnoringOtherApps])
+usleep(600000)
+`], { stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal((await once(activator, 'exit'))[0], 0);
   await sendCompanion(socket, { action: 'upsert', plan: {
     id: 'completed-collapsed-click', title: 'Удалить по крестику', revision: 1, status: 'completed',
     completedAt: new Date(Date.now() - 2000).toISOString(),
     steps: [{ id: 'done', title: 'Готово', status: 'completed' }],
   }});
-  await sendCompanion(socket, { action: 'set_focus_collapse', enabled: true });
+  await sendCompanion(socket, { action: 'workspace_transition_probe', name: 'departure-started' });
+  await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.window.spaceDepartureActive
+      && state.window.presentation === 'collapsed'
+      && !state.window.presentationTransitioning && state;
+  });
+  await sendCompanion(socket, { action: 'workspace_transition_probe', name: 'departure-completed' });
   const collapsed = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
     return state.window.presentation === 'collapsed' && !state.window.presentationTransitioning && state;

@@ -85,6 +85,8 @@ private enum PanelMetrics {
     static let headerBottom: CGFloat = 8
     static let headerDivider: CGFloat = 0.5
     static let planHoverExitGrace: TimeInterval = 0.18
+    static let resizeEdge: CGFloat = 7
+    static let resizeCorner: CGFloat = 12
 }
 
 private let completionCheckDuration: TimeInterval = 1.35
@@ -228,7 +230,14 @@ struct Saved: Codable {
     var unfocusedExpandedWindowFrame: WindowFrame? = nil
     var collapsedWindowFrame: WindowFrame? = nil
     var collapseWhenUnfocused: Bool? = nil
+    var hostAttachment: HostAttachment? = nil
     var retentionStartedAt: [String: String]? = nil
+}
+struct HostAttachment: Codable {
+    var x: Double
+    var y: Double
+    var width: Double
+    var height: Double
 }
 struct Command: Decodable {
     var action: String
@@ -1256,6 +1265,7 @@ final class PanelHostingView<Content: View>: NSHostingView<Content> {
     let resizeCursorZoneCount = 8
     var resizeEnabled = true
     var windowDragEnabled = false
+    var frameConstraint: ((NSRect) -> NSRect)?
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var mouseDownCanMoveWindow: Bool { windowDragEnabled }
@@ -1272,8 +1282,8 @@ final class PanelHostingView<Content: View>: NSHostingView<Content> {
 
     func resizeCursorKind(at point: NSPoint) -> String? {
         guard resizeEnabled else { return nil }
-        let edge: CGFloat = 18
-        let corner: CGFloat = 18
+        let edge = PanelMetrics.resizeEdge
+        let corner = PanelMetrics.resizeCorner
         guard bounds.contains(point) else { return nil }
         let left = point.x <= edge, right = point.x >= bounds.width - edge
         let top = isFlipped ? point.y <= edge : point.y >= bounds.height - edge
@@ -1336,7 +1346,7 @@ final class PanelHostingView<Content: View>: NSHostingView<Content> {
             } else if kind.contains("top") {
                 frame.size.height = max(minSize.height, initialFrame.height + dy)
             }
-            window.setFrame(frame, display: true)
+            window.setFrame(frameConstraint?(frame) ?? frame, display: true)
             resizeCursor(for: kind).set()
         }
     }
@@ -1345,8 +1355,8 @@ final class PanelHostingView<Content: View>: NSHostingView<Content> {
         super.resetCursorRects()
         discardCursorRects()
         guard resizeEnabled else { return }
-        let edge: CGFloat = 18
-        let corner: CGFloat = 18
+        let edge = PanelMetrics.resizeEdge
+        let corner = PanelMetrics.resizeCorner
         let horizontalWidth = max(0, bounds.width - corner * 2)
         let verticalHeight = max(0, bounds.height - corner * 2)
         let topY: CGFloat = isFlipped ? 0 : bounds.height - edge
@@ -1366,7 +1376,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let store = Store()
     var panel: PlanPanel!
     var hostView: PanelHostingView<CompanionRootView>!
-    let spaceRouter = SpaceWindowRouter()
+    let spaceRouter: SpaceWindowRouter? = ProcessInfo.processInfo.environment["PLAN_COMPANION_DISABLE_SPACE_ROUTING"] == "1"
+        ? nil : SpaceWindowRouter()
     let spaceMirrorState = SpaceMirrorState()
     var spaceMirrorPanel: PlanPanel!
     var spaceMirrorHostView: PanelHostingView<SpaceMirrorRootView>!
@@ -1383,6 +1394,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var restoredExpandedFrame: WindowFrame?
     var restoredUnfocusedExpandedFrame: WindowFrame?
     var restoredCollapsedFrame: WindowFrame?
+    var restoredHostAttachment: HostAttachment?
     var expandedFrame: NSRect?
     var unfocusedExpandedFrame: NSRect?
     var collapsedFrame: NSRect?
@@ -1418,6 +1430,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var lastHostWindowPollAt = Date.distantPast
     var earlyHostDepartureBaseline: HostWindowObservation?
     var earlyHostDepartureReturnSamples = 0
+    var hostSpaceMotionCandidate: HostWindowObservation?
+    var hostSpaceMotionSamples = 0
     var spaceDepartureActive = false
     var spaceArrivalPending = false
     var awayFromHostSpace = false
@@ -1430,6 +1444,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var hostMinimizingActive = false
     var hostWindowMinimized = false
     var lastHostMinimizeTrigger: String?
+    var hostAttachment: HostAttachment?
+    var applyingHostAttachmentFrame = false
     let retentionSeconds = max(0.1, Double(ProcessInfo.processInfo.environment["PLAN_COMPANION_RETENTION_SECONDS"] ?? "") ?? 30)
     let collapsedSize = NSSize(width: 52, height: 52)
     let expandedMinimumSize = NSSize(width: PanelMetrics.minimumWidth, height: PanelMetrics.minimumHeight)
@@ -1499,11 +1515,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 restoredUnfocusedExpandedFrame = saved.unfocusedExpandedWindowFrame
                     ?? saved.expandedWindowFrame ?? saved.windowFrame
                 restoredCollapsedFrame = saved.collapsedWindowFrame
-                focusCollapseEnabled = saved.collapseWhenUnfocused
-                    ?? (env["PLAN_COMPANION_FOCUS_COLLAPSE"] == "1")
+                restoredHostAttachment = saved.hostAttachment
+                hostAttachment = saved.hostAttachment
+                focusCollapseEnabled = false
                 retentionStartedAt = (saved.retentionStartedAt ?? [:]).compactMapValues(parseISODate)
             } else {
-                focusCollapseEnabled = env["PLAN_COMPANION_FOCUS_COLLAPSE"] == "1"
+                focusCollapseEnabled = false
             }
             try startSocket()
         } catch { fputs("Startup failed: \(error)\n", stderr); NSApp.terminate(nil); return }
@@ -1512,7 +1529,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                           styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "Task Plan Companion"
         panel.delegate = self; panel.isReleasedWhenClosed = false
-        panel.level = .floating; panel.hidesOnDeactivate = false; panel.becomesKeyOnlyIfNeeded = true
+        panel.level = .normal; panel.hidesOnDeactivate = false; panel.becomesKeyOnlyIfNeeded = true
         panel.collectionBehavior = [.fullScreenAuxiliary]
         panel.titleVisibility = .hidden; panel.titlebarAppearsTransparent = true
         panel.standardWindowButton(.closeButton)?.isHidden = true
@@ -1529,12 +1546,15 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             hostView.sizingOptions = []
         }
         panel.contentView = hostView
+        hostView.frameConstraint = { [weak self] frame in
+            self?.constrainedExpandedFrame(frame) ?? frame
+        }
         panel.enableCursorRects()
         spaceMirrorPanel = PlanPanel(contentRect: NSRect(origin: .zero, size: collapsedSize),
                                      styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         spaceMirrorPanel.title = "Task Plan Host Space Mirror"
         spaceMirrorPanel.isReleasedWhenClosed = false
-        spaceMirrorPanel.level = .floating
+        spaceMirrorPanel.level = .normal
         spaceMirrorPanel.hidesOnDeactivate = false
         spaceMirrorPanel.becomesKeyOnlyIfNeeded = true
         spaceMirrorPanel.collectionBehavior = [.fullScreenAuxiliary]
@@ -1662,7 +1682,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if self.spaceDepartureActive || self.awayFromHostSpace {
                     self.journal("space_departure_settled")
                 } else {
-                    self.beginEarlyPresentationTransition(source: "host-deactivated", requireHostFrontmost: false)
+                    self.syncPresentation()
+                    self.journal("host_deactivated_without_collapse")
                 }
             }
         })
@@ -1670,6 +1691,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                              object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             self.workspaceGestureGeneration += 1
+            if let hostSpaceID = self.hostSpaceID,
+               self.spaceRouter?.activeSpace() == hostSpaceID {
+                self.restoreHostSpacePresentation()
+                return
+            }
             let hostIsFrontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == self.hostBundle
             if hostIsFrontmost, self.spaceArrivalPending || self.awayFromHostSpace {
                 self.restoreHostSpacePresentation()
@@ -1708,7 +1734,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool { dismissed = true; panel.orderOut(nil); journal("dismissed"); return false }
     func windowDidMove(_ notification: Notification) {
-        guard !applyingPresentationFrame, !store.transitionIconOnly, !collapsingToIcon else { return }
+        guard !applyingPresentationFrame, !applyingHostAttachmentFrame,
+              !store.transitionIconOnly, !collapsingToIcon else { return }
         if store.collapsed {
             collapsedFrame = panel.frame
         } else {
@@ -1723,17 +1750,21 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             } else {
                 expandedFrame = panel.frame
+                captureHostAttachment()
             }
         }
         try? persist()
     }
     func windowDidResize(_ notification: Notification) {
-        guard !applyingPresentationFrame, !store.collapsed,
+        guard !applyingPresentationFrame, !applyingHostAttachmentFrame, !store.collapsed,
               !store.transitionIconOnly, !collapsingToIcon else { return }
         guard panel.frame.width >= expandedMinimumSize.width,
               panel.frame.height >= expandedMinimumSize.height else { return }
         if expandedFromIconSource != nil { unfocusedExpandedFrame = panel.frame }
-        else { expandedFrame = panel.frame }
+        else {
+            expandedFrame = panel.frame
+            captureHostAttachment()
+        }
         try? persist()
     }
 
@@ -1772,8 +1803,15 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let dy = pointer.y - initialPointer.y
             if !didDrag, hypot(dx, dy) < 3 { continue }
             didDrag = true
-            panel.setFrameOrigin(NSPoint(x: initialFrame.minX + dx,
-                                         y: initialFrame.minY + dy))
+            var frame = initialFrame
+            frame.origin = NSPoint(x: initialFrame.minX + dx,
+                                   y: initialFrame.minY + dy)
+            panel.setFrame(constrainedExpandedFrame(frame), display: true)
+        }
+        if didDrag, !store.collapsed, !spaceDepartureActive, !awayFromHostSpace {
+            expandedFrame = panel.frame
+            captureHostAttachment()
+            try? persist()
         }
         if didDrag, !spaceDepartureActive, !awayFromHostSpace,
            NSWorkspace.shared.frontmostApplication?.bundleIdentifier == hostBundle {
@@ -1853,6 +1891,84 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         result.origin.x = min(max(result.minX, visible.minX), visible.maxX - result.width)
         result.origin.y = min(max(result.minY, visible.minY), visible.maxY - result.height)
         return result
+    }
+
+    func appKitFrame(for observation: HostWindowObservation) -> NSRect {
+        let mainDisplay = CGDisplayBounds(CGMainDisplayID())
+        return NSRect(x: observation.frame.minX,
+                      y: mainDisplay.maxY - observation.frame.maxY,
+                      width: observation.frame.width,
+                      height: observation.frame.height)
+    }
+
+    func currentHostFrame() -> NSRect? {
+        guard let observation = primaryHostWindowObservation() else { return nil }
+        return appKitFrame(for: observation)
+    }
+
+    func constrainedExpandedFrame(_ frame: NSRect) -> NSRect {
+        guard !store.collapsed, !spaceDepartureActive, !awayFromHostSpace,
+              let hostFrame = currentHostFrame() else { return frame }
+        return clamped(frame, to: hostFrame)
+    }
+
+    func attachedExpandedFrame(fallback: NSRect) -> NSRect {
+        guard let hostFrame = currentHostFrame(), let hostAttachment else {
+            return constrainedExpandedFrame(fallback)
+        }
+        return frame(for: hostAttachment, in: hostFrame)
+    }
+
+    func attachment(for panelFrame: NSRect, in hostFrame: NSRect) -> HostAttachment? {
+        guard hostFrame.width > 0, hostFrame.height > 0 else { return nil }
+        let frame = clamped(panelFrame, to: hostFrame)
+        return HostAttachment(x: Double((frame.minX - hostFrame.minX) / hostFrame.width),
+                              y: Double((frame.minY - hostFrame.minY) / hostFrame.height),
+                              width: Double(frame.width / hostFrame.width),
+                              height: Double(frame.height / hostFrame.height))
+    }
+
+    func frame(for attachment: HostAttachment, in hostFrame: NSRect) -> NSRect {
+        let width = max(expandedMinimumSize.width,
+                        hostFrame.width * CGFloat(attachment.width))
+        let height = max(expandedMinimumSize.height,
+                         hostFrame.height * CGFloat(attachment.height))
+        let candidate = NSRect(x: hostFrame.minX + hostFrame.width * CGFloat(attachment.x),
+                               y: hostFrame.minY + hostFrame.height * CGFloat(attachment.y),
+                               width: width, height: height)
+        return clamped(candidate, to: hostFrame)
+    }
+
+    func captureHostAttachment() {
+        guard !store.collapsed, !spaceDepartureActive, !awayFromHostSpace,
+              let hostFrame = currentHostFrame(),
+              let attachment = attachment(for: panel.frame, in: hostFrame) else { return }
+        hostAttachment = attachment
+    }
+
+    func syncAttachedFrame(to observation: HostWindowObservation) {
+        guard !store.collapsed, !spaceDepartureActive, !awayFromHostSpace else { return }
+        let hostFrame = appKitFrame(for: observation)
+        guard let attachment = hostAttachment else {
+            let fitted = clamped(panel.frame, to: hostFrame)
+            applyingHostAttachmentFrame = true
+            panel.setFrame(fitted, display: true)
+            applyingHostAttachmentFrame = false
+            expandedFrame = fitted
+            hostAttachment = self.attachment(for: fitted, in: hostFrame)
+            try? persist()
+            journal("host_attachment_captured")
+            return
+        }
+        let target = frame(for: attachment, in: hostFrame)
+        guard abs(target.minX - panel.frame.minX) > 0.5
+                || abs(target.minY - panel.frame.minY) > 0.5
+                || abs(target.width - panel.frame.width) > 0.5
+                || abs(target.height - panel.frame.height) > 0.5 else { return }
+        applyingHostAttachmentFrame = true
+        panel.setFrame(target, display: true)
+        applyingHostAttachmentFrame = false
+        expandedFrame = target
     }
 
     func clampedCollapsedFrame(centeredAt center: NSPoint) -> NSRect {
@@ -1987,6 +2103,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.hostView.resizeEnabled = resizeEnabled
             self.hostView.windowDragEnabled = false
             self.applyingPresentationFrame = false
+            if !self.awayFromHostSpace { self.orderPanelAboveHost() }
             self.settlePendingPresentationSync()
         }
     }
@@ -2066,7 +2183,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             if expandedFromIconSource != nil {
                 unfocusedExpandedFrame = panel.frame
-                let target = fittedExpandedFrame()
+                let target = attachedExpandedFrame(fallback: fittedExpandedFrame())
                 expandedFromIconSource = nil
                 expandedMovedBeyondSource = false
                 expandedHoverExitStartedAt = nil
@@ -2091,7 +2208,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             panel.orderFrontRegardless()
             return
         }
-        let target = fittedExpandedFrame()
+        let target = attachedExpandedFrame(fallback: fittedExpandedFrame())
         store.transitionToCollapsed = false
         store.transitionIconOnly = true
         schedulePresentationFrame(target, alpha: 1, animated: animated) { [weak self] in
@@ -2138,19 +2255,19 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func beginEarlyPresentationTransition(source: String, requireHostFrontmost: Bool = true) {
-        guard focusCollapseEnabled, store.active != nil, !dismissed else { return }
+        guard store.active != nil, !dismissed else { return }
         if requireHostFrontmost {
             guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == hostBundle else { return }
         }
         workspaceGestureGeneration += 1
         lastEarlyPresentationSignal = source
         lastEarlyPresentationSignalAt = Date()
-        collapseToIcon(animated: true)
-        journal("early_presentation_transition")
+        syncPresentation()
+        journal("focus_transition_ignored")
     }
 
     func beginSpaceDeparture() {
-        guard focusCollapseEnabled, store.active != nil, !dismissed else { return }
+        guard store.active != nil, !dismissed else { return }
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == hostBundle else { return }
         guard !spaceDepartureActive, !awayFromHostSpace else { return }
         guard let spaceRouter, let currentSpace = spaceRouter.activeSpace() else {
@@ -2162,13 +2279,13 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard !nonHostSpaces.isEmpty else { return }
         let remoteIconReady = primeRemoteSpaceIcon(hostSpace: currentSpace)
         workspaceGestureGeneration += 1
-        spaceOriginWasCollapsed = store.collapsed
+        spaceOriginWasCollapsed = false
         hostSpaceID = currentSpace
         spaceDepartureActive = true
         spaceArrivalPending = false
         lastEarlyPresentationSignal = "host-window-motion-leaving"
         lastEarlyPresentationSignalAt = Date()
-        spaceMirrorState.collapsed = store.collapsed
+        spaceMirrorState.collapsed = false
         spaceMirrorPanel.setFrame(panel.frame, display: true)
         spaceMirrorPanel.alphaValue = panel.alphaValue
         spaceMirrorPanel.orderFrontRegardless()
@@ -2182,6 +2299,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         spaceMirrorVisible = true
         compactMainWindowForSpaceRouting()
+        panel.level = .floating
         guard spaceRouter.assign(windowNumber: panel.windowNumber, to: nonHostSpaces) else {
             spaceDepartureActive = false
             spaceOriginWasCollapsed = nil
@@ -2206,7 +2324,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @discardableResult func primeRemoteSpaceIcon(hostSpace explicitHostSpace: UInt64? = nil) -> Bool {
-        guard focusCollapseEnabled, store.active != nil, !dismissed,
+        guard store.active != nil, !dismissed,
               let spaceRouter,
               let hostSpace = explicitHostSpace ?? spaceRouter.activeSpace() else {
             hideRemoteSpaceIcon()
@@ -2248,6 +2366,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         spaceDepartureActive = false
         awayFromHostSpace = true
         spaceArrivalPending = false
+        panel.level = .floating
         panel.alphaValue = 0.82
         panel.orderFrontRegardless()
         hideRemoteSpaceIcon()
@@ -2262,11 +2381,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         awayFromHostSpace = false
         earlyHostDepartureBaseline = nil
         earlyHostDepartureReturnSamples = 0
+        hostSpaceMotionCandidate = nil
+        hostSpaceMotionSamples = 0
         restoreHostSpacePresentation(event: "space_departure_cancelled")
     }
 
     func restoreHostSpacePresentation(event: String? = nil) {
-        let restoreCollapsed = spaceOriginWasCollapsed ?? false
         guard let hostSpaceID, let spaceRouter else {
             spaceArrivalPending = false
             spaceDepartureActive = false
@@ -2282,21 +2402,17 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         awayFromHostSpace = false
         earlyHostDepartureBaseline = nil
         earlyHostDepartureReturnSamples = 0
+        hostSpaceMotionCandidate = nil
+        hostSpaceMotionSamples = 0
         panel.alphaValue = 0
+        panel.level = .normal
         guard spaceRouter.assign(windowNumber: panel.windowNumber, to: [hostSpaceID]) else {
             panel.alphaValue = store.collapsed ? 0.82 : 1
             panel.orderFrontRegardless()
             journal("space_restore_routing_failed")
             return
         }
-        if restoreCollapsed {
-            if store.collapsed {
-                panel.alphaValue = 0.82
-                panel.orderFrontRegardless()
-            } else {
-                collapseToIcon(animated: false)
-            }
-        } else if store.collapsed || collapsingToIcon {
+        if store.collapsed || collapsingToIcon {
             expandForHost(animated: false)
         } else {
             panel.alphaValue = 1
@@ -2306,11 +2422,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         spaceOriginWasCollapsed = nil
         self.hostSpaceID = nil
         DispatchQueue.main.async { [weak self] in self?.hideSpaceMirror() }
-        journal(event ?? (restoreCollapsed ? "space_arrival_restored_collapsed" : "space_arrival_restored_expanded"))
+        if let current = primaryHostWindowObservation() { syncAttachedFrame(to: current) }
+        journal(event ?? "space_arrival_restored_expanded")
     }
 
     func beginHostMinimize(from baseline: HostWindowObservation, trigger: String) {
-        guard focusCollapseEnabled, store.active != nil, !dismissed else { return }
+        guard store.active != nil, !dismissed else { return }
         hostMinimizeBaseline = baseline
         hostMinimizingActive = true
         hostWindowMinimized = false
@@ -2318,25 +2435,30 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         lastHostMinimizeTrigger = trigger
         lastEarlyPresentationSignal = "host-window-minimizing"
         lastEarlyPresentationSignalAt = Date()
-        collapseToIcon(animated: true)
+        panel.orderOut(nil)
         journal("host_minimize_started")
     }
 
     func beginHostRestore() {
-        guard focusCollapseEnabled, store.active != nil, store.collapsed, !dismissed else { return }
+        guard store.active != nil, !dismissed else { return }
         hostWindowMinimized = false
         hostMinimizingActive = false
         hostMinimizeCandidateSamples = 0
         lastEarlyPresentationSignal = "host-window-restoring"
         lastEarlyPresentationSignalAt = Date()
-        expandForHost(animated: true)
+        panel.level = .normal
+        if store.collapsed { expandForHost(animated: false) }
+        else { panel.alphaValue = 1; panel.orderFrontRegardless() }
+        if let current = primaryHostWindowObservation() { syncAttachedFrame(to: current) }
         journal("host_restore_started")
     }
 
-    func primaryHostWindowObservation() -> HostWindowObservation? {
+    func primaryHostWindowObservation(onScreenOnly: Bool = true) -> HostWindowObservation? {
         guard let hostPID = NSRunningApplication.runningApplications(withBundleIdentifier: hostBundle)
                 .first?.processIdentifier,
-              let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+              let rows = CGWindowListCopyWindowInfo(onScreenOnly
+                    ? [.optionOnScreenOnly, .excludeDesktopElements]
+                    : [.optionAll, .excludeDesktopElements],
                                                     kCGNullWindowID) as? [[String: Any]] else { return nil }
         return rows.compactMap { row -> HostWindowObservation? in
             guard (row[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == hostPID,
@@ -2349,8 +2471,36 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
     }
 
+    @discardableResult func routeToHostSpaceIfNeeded() -> Bool {
+        guard store.active != nil, !dismissed, !spaceDepartureActive, !awayFromHostSpace,
+              let spaceRouter, let currentSpace = spaceRouter.activeSpace(),
+              let host = primaryHostWindowObservation(onScreenOnly: false) else { return false }
+        let hostSpaces = spaceRouter.spaces(for: host.id)
+        guard let hostSpace = hostSpaces.first, hostSpace != currentSpace else { return false }
+        let remoteSpaces = spaceRouter.displaySpaces(containing: hostSpace).filter { $0 != hostSpace }
+        guard remoteSpaces.contains(currentSpace), !remoteSpaces.isEmpty else { return false }
+        expandedFrame = panel.frame
+        hostSpaceID = hostSpace
+        spaceOriginWasCollapsed = false
+        awayFromHostSpace = true
+        compactMainWindowForSpaceRouting()
+        panel.level = .floating
+        guard spaceRouter.assign(windowNumber: panel.windowNumber, to: remoteSpaces) else {
+            awayFromHostSpace = false
+            hostSpaceID = nil
+            spaceOriginWasCollapsed = nil
+            return false
+        }
+        panel.alphaValue = 0.82
+        panel.orderFrontRegardless()
+        hideSpaceMirror()
+        hideRemoteSpaceIcon()
+        journal("started_away_from_host_space")
+        return true
+    }
+
     func noteSpaceArrival() {
-        guard focusCollapseEnabled, store.active != nil, store.collapsed, !dismissed else { return }
+        guard store.active != nil, store.collapsed, !dismissed else { return }
         guard !spaceArrivalPending else { return }
         spaceArrivalPending = true
         lastEarlyPresentationSignal = "host-window-motion-arriving"
@@ -2379,8 +2529,20 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return earlyHostDepartureReturnSamples >= 2
     }
 
+    func orderPanelAboveHost() {
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == hostBundle {
+            panel.level = .floating
+            panel.orderFrontRegardless()
+        } else {
+            // Dropping back to the normal level keeps the already visible plan
+            // above Codex while allowing the newly frontmost app to cover it.
+            panel.level = .normal
+            if !panel.isVisible { panel.orderFront(nil) }
+        }
+    }
+
     func syncWorkspaceWindowMotion() {
-        guard panel != nil, focusCollapseEnabled, store.active != nil, !dismissed else {
+        guard panel != nil, store.active != nil, !dismissed else {
             if let hostSpaceID, let spaceRouter, panel != nil {
                 _ = spaceRouter.assign(windowNumber: panel.windowNumber, to: [hostSpaceID])
             }
@@ -2388,6 +2550,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             lastHostWindowObservation = nil
             earlyHostDepartureBaseline = nil
             earlyHostDepartureReturnSamples = 0
+            hostSpaceMotionCandidate = nil
+            hostSpaceMotionSamples = 0
             hostMinimizeBaseline = nil
             hostMinimizeCandidateSamples = 0
             hostMinimizingActive = false
@@ -2408,10 +2572,15 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard hostWindowObservationInitialized else {
             hostWindowObservationInitialized = true
             lastHostWindowObservation = current
+            if let current { syncAttachedFrame(to: current) }
             return
         }
         defer { lastHostWindowObservation = current }
         let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+
+        if !hostWindowMinimized, let current {
+            syncAttachedFrame(to: current)
+        }
 
         if hostWindowMinimized, lastHostWindowObservation == nil, current != nil {
             beginHostRestore()
@@ -2429,7 +2598,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 hostMinimizingActive = false
                 hostWindowMinimized = false
                 hostMinimizeBaseline = nil
-                if store.collapsed { expandForHost(animated: true) }
+                if store.collapsed { expandForHost(animated: false) }
+                else { panel.alphaValue = 1; orderPanelAboveHost() }
+                syncAttachedFrame(to: current!)
                 journal("host_minimize_cancelled")
             }
             return
@@ -2472,11 +2643,26 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
            previous.id == current.id {
             let deltaX = current.frame.minX - previous.frame.minX
             let deltaY = current.frame.minY - previous.frame.minY
-            if abs(deltaX) >= 8, abs(deltaX) > abs(deltaY) * 2 {
-                earlyHostDepartureBaseline = previous
-                earlyHostDepartureReturnSamples = 0
-                beginSpaceDeparture()
-                return
+            if abs(deltaX) >= 4, abs(deltaX) > abs(deltaY) * 2 {
+                if hostSpaceMotionCandidate?.id != current.id {
+                    hostSpaceMotionCandidate = previous
+                    hostSpaceMotionSamples = 1
+                } else {
+                    hostSpaceMotionSamples += 1
+                }
+                if let baseline = hostSpaceMotionCandidate,
+                   hostSpaceMotionSamples >= 2,
+                   abs(current.frame.minX - baseline.frame.minX) >= 24 {
+                    earlyHostDepartureBaseline = baseline
+                    earlyHostDepartureReturnSamples = 0
+                    hostSpaceMotionCandidate = nil
+                    hostSpaceMotionSamples = 0
+                    beginSpaceDeparture()
+                    return
+                }
+            } else {
+                hostSpaceMotionCandidate = nil
+                hostSpaceMotionSamples = 0
             }
         }
 
@@ -2509,39 +2695,41 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if lastVisibility != false { lastVisibility = false; journal("visibility") }
             return
         }
+        if routeToHostSpaceIfNeeded() { return }
         if spaceDepartureActive {
             return
         }
         if awayFromHostSpace {
+            panel.level = .floating
             panel.alphaValue = 0.82
             panel.orderFrontRegardless()
             return
         }
-        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        if !focusCollapseEnabled {
-            hideRemoteSpaceIcon()
-            let companion = Bundle.main.bundleIdentifier
-            let visible = front == hostBundle || front == companion
-            store.collapsed = false
-            hostView.resizeEnabled = true
-            hostView.windowDragEnabled = false
-            panel.minSize = collapsedSize
-            panel.alphaValue = 1
-            if visible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
-            if visible != lastVisibility { lastVisibility = visible; journal("visibility") }
+        if hostWindowMinimized {
+            panel.orderOut(nil)
+            if lastVisibility != false { lastVisibility = false; journal("visibility") }
             return
         }
-        let companion = Bundle.main.bundleIdentifier
-        if front == hostBundle {
-            expandForHost(animated: store.collapsed)
-            _ = primeRemoteSpaceIcon()
-        } else if expandedFromIconSource != nil {
+        if expandedFromIconSource != nil {
+            // A plan expanded from the remote Space icon stays floating until
+            // the pointer leaves it or Codex returns to the active Space.
+            panel.level = .floating
             hostView.resizeEnabled = false
             panel.orderFrontRegardless()
-        } else if front == companion, !store.collapsed {
-            panel.orderFrontRegardless()
         } else {
-            collapseToIcon(animated: true)
+            if store.collapsed || collapsingToIcon {
+                panel.level = .normal
+                expandForHost(animated: false)
+            } else {
+                store.collapsed = false
+                hostView.resizeEnabled = true
+                hostView.windowDragEnabled = false
+                panel.minSize = collapsedSize
+                panel.alphaValue = 1
+                orderPanelAboveHost()
+            }
+            if let current = primaryHostWindowObservation() { syncAttachedFrame(to: current) }
+            _ = primeRemoteSpaceIcon()
         }
         let visible = panel.isVisible
         if visible != lastVisibility { lastVisibility = visible; journal("visibility") }
@@ -2562,7 +2750,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func syncCollapsedHover() {
-        guard focusCollapseEnabled, store.collapsed, !applyingPresentationFrame,
+        guard awayFromHostSpace, store.collapsed, !applyingPresentationFrame,
               panel.isVisible, store.active != nil else {
             if store.collapsedHovered { store.collapsedHovered = false }
             collapsedHoverStartedAt = nil
@@ -2596,7 +2784,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func syncExpandedHoverExit() {
-        guard focusCollapseEnabled, !store.collapsed, !applyingPresentationFrame,
+        guard awayFromHostSpace, !store.collapsed, !applyingPresentationFrame,
               expandedFromIconSource != nil,
               NSWorkspace.shared.frontmostApplication?.bundleIdentifier != hostBundle else {
             expandedHoverExitStartedAt = nil
@@ -2615,8 +2803,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func liveResizeCursorKind(at point: NSPoint) -> String? {
         guard panel?.isVisible == true, !store.collapsed, hostView.resizeEnabled else { return nil }
         let frame = panel.frame
-        let edge: CGFloat = 18
-        let corner: CGFloat = 18
+        let edge = PanelMetrics.resizeEdge
+        let corner = PanelMetrics.resizeCorner
         guard frame.contains(point) else { return nil }
         let x = point.x - frame.minX
         let y = point.y - frame.minY
@@ -2646,32 +2834,21 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let point = NSEvent.mouseLocation
         let kind = liveResizeCursorKind(at: point)
         if let kind {
-            let entering = liveCursorKind == nil && !suppressingFallbackResizeCursor
             suppressingFallbackResizeCursor = false
             liveCursorKind = kind
-            if entering && !suppressResizeActivationUntilPointerExit {
-                NSApp.activate(ignoringOtherApps: true)
-                panel.makeKeyAndOrderFront(nil)
-            }
             hostView.resizeCursor(for: kind).set()
         } else if panel?.isVisible == true,
-                  panel.frame.insetBy(dx: -8, dy: -8).contains(point),
-                  !panel.frame.insetBy(dx: 22, dy: 22).contains(point) {
-            let entering = liveCursorKind == nil && !suppressingFallbackResizeCursor
+                  panel.frame.insetBy(dx: -4, dy: -4).contains(point),
+                  !panel.frame.insetBy(dx: PanelMetrics.resizeCorner + 2,
+                                       dy: PanelMetrics.resizeCorner + 2).contains(point) {
             liveCursorKind = nil
             suppressingFallbackResizeCursor = true
-            if entering && !suppressResizeActivationUntilPointerExit {
-                NSApp.activate(ignoringOtherApps: true)
-                panel.makeKeyAndOrderFront(nil)
-            }
             NSCursor.arrow.set()
         } else if liveCursorKind != nil || suppressingFallbackResizeCursor {
             liveCursorKind = nil
             suppressingFallbackResizeCursor = false
             suppressResizeActivationUntilPointerExit = false
             NSCursor.arrow.set()
-            NSRunningApplication.runningApplications(withBundleIdentifier: hostBundle).first?
-                .activate(options: [.activateAllWindows])
         } else if suppressResizeActivationUntilPointerExit {
             suppressResizeActivationUntilPointerExit = false
         }
@@ -2795,6 +2972,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                       unfocusedExpandedWindowFrame: savedUnfocusedExpanded ?? restoredUnfocusedExpandedFrame,
                                       collapsedWindowFrame: savedCollapsed ?? restoredCollapsedFrame,
                                       collapseWhenUnfocused: focusCollapseEnabled,
+                                      hostAttachment: hostAttachment ?? restoredHostAttachment,
                                       retentionStartedAt: savedRetention))
             .write(to: dataURL.appendingPathComponent("state.json"), options: .atomic)
     }
@@ -2832,7 +3010,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "closable": panel?.styleMask.contains(.closable) ?? false,
                                      "movableByBackground": panel?.isMovableByWindowBackground ?? false,
                                      "resizeCursorZones": hostView?.resizeCursorZoneCount ?? 0,
-                                     "resizeCursorTracking": "explicit-18pt-custom-functional-edge-single-cursor",
+                                     "resizeCursorTracking": "explicit-7pt-edge-12pt-corner-nonactivating",
+                                     "resizeCursorActivatesApplication": false,
                                      "resizeCoordinateMapping": "flipped-hosting-view-to-screen-edges",
                                      "liveResizeCursorKind": liveCursorKind ?? NSNull(),
                                      "fallbackResizeCursorSuppressed": suppressingFallbackResizeCursor,
@@ -2913,6 +3092,15 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "completedAgentCheckAnimation": "pop-then-periodic-rock",
                                      "completedPlanRetentionSeconds": retentionSeconds,
                                      "focusCollapseEnabled": focusCollapseEnabled,
+                                     "focusPresentationBehavior": "expanded-on-host-space-no-focus-collapse",
+                                     "hostAttachmentBehavior": "proportional-inside-codex-window",
+                                     "hostAttachment": hostAttachment.map {
+                                        ["x": $0.x, "y": $0.y,
+                                         "width": $0.width, "height": $0.height]
+                                     } ?? NSNull(),
+                                     "hostWindowLevelBehavior": "floating-with-codex-normal-behind-frontmost-apps",
+                                     "panelLevel": panel?.level.rawValue ?? NSWindow.Level.normal.rawValue,
+                                     "panelOnActiveSpace": panel?.isOnActiveSpace ?? false,
                                      "hostLifecycle": "workspace-termination-observer-with-750ms-running-app-fallback",
                                      "workspaceTransitionBehavior": "preloaded-remote-icon-with-host-mirror",
                                      "workspaceWindowMotionPollingHz": 30,
@@ -3051,27 +3239,24 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 guard let id = command.id, store.plans.contains(where: { $0.id == id }) else { throw NSError(domain: "Unknown plan", code: 4) }
                 removePlan(id, event: "plan_removed")
             case "set_focus_collapse":
-                guard let enabled = command.enabled else { throw NSError(domain: "Missing enabled preference", code: 13) }
-                focusCollapseEnabled = enabled
-                if enabled {
-                    retentionStartedAt = retentionStartedAt.filter { id, _ in store.plans.contains(where: { $0.id == id }) }
-                } else {
-                    retentionStartedAt.removeAll()
-                    expandedFromIconSource = nil
-                    expandedMovedBeyondSource = false
-                }
+                guard command.enabled != nil else { throw NSError(domain: "Missing enabled preference", code: 13) }
+                focusCollapseEnabled = false
+                expandedFromIconSource = nil
+                expandedMovedBeyondSource = false
                 try persist()
                 scheduleExpiry()
                 syncPresentation()
-                journal("focus_collapse_preference")
+                journal("focus_collapse_removed")
             case "set_frame":
                 guard let x = command.x, let y = command.y, let width = command.width, let height = command.height,
                       [x, y, width, height].allSatisfy({ $0.isFinite }),
                       (280...4000).contains(width), (240...4000).contains(height) else {
                     throw NSError(domain: "Invalid window frame", code: 8)
                 }
-                panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: false)
+                let requested = NSRect(x: x, y: y, width: width, height: height)
+                panel.setFrame(constrainedExpandedFrame(requested), display: false)
                 expandedFrame = panel.frame
+                captureHostAttachment()
                 try persist()
             case "cursor_probe":
                 guard let x = command.x, let y = command.y else { throw NSError(domain: "Missing cursor probe point", code: 9) }

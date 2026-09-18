@@ -36,7 +36,7 @@ Do not create a plan merely to answer a question, inspect one file, or perform a
 
 ## Companion preference
 
-When the native companion is configured, `set_companion_focus_mode` controls its persisted focus behavior. Call it only when the user explicitly asks to enable or disable collapsing the expanded plan window into a draggable icon while Codex is unfocused. Do not treat installation or ordinary plan creation as consent to change this preference.
+The native companion remains expanded on the Codex Space regardless of application focus. It uses the compact draggable icon only on other macOS Spaces. `set_companion_focus_mode` remains a compatibility control that confirms this Space-only behavior; it no longer enables focus-loss collapse.
 
 ## Agent work categories
 

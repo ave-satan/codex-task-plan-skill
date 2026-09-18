@@ -55,7 +55,8 @@ try {
   assert.equal(initialWindow.resizable,true);
   assert.equal(initialWindow.movableByBackground,true);
   assert.equal(initialWindow.resizeCursorZones,8);
-  assert.equal(initialWindow.resizeCursorTracking,'explicit-18pt-custom-functional-edge-single-cursor');
+  assert.equal(initialWindow.resizeCursorTracking,'explicit-7pt-edge-12pt-corner-nonactivating');
+  assert.equal(initialWindow.resizeCursorActivatesApplication,false);
   assert.equal(initialWindow.resizeCoordinateMapping,'flipped-hosting-view-to-screen-edges');
   assert.equal(initialWindow.nativeResizableStyleMask,false);
   assert.equal(initialWindow.resizeImplementation,'custom-content-edge');
@@ -122,6 +123,10 @@ try {
   assert.equal(initialWindow.hoverExpandedFrameContainsSourceIcon,true);
   assert.equal(initialWindow.collapseVisualSwap,'morphing-window-shell-with-icon-only-content');
   assert.equal(initialWindow.hostLifecycle,'workspace-termination-observer-with-750ms-running-app-fallback');
+  assert.equal(initialWindow.focusCollapseEnabled,false);
+  assert.equal(initialWindow.focusPresentationBehavior,'expanded-on-host-space-no-focus-collapse');
+  assert.equal(initialWindow.hostAttachmentBehavior,'proportional-inside-codex-window');
+  assert.equal(initialWindow.hostWindowLevelBehavior,'floating-with-codex-normal-behind-frontmost-apps');
   assert.equal(initialWindow.agentIconStyle,'illustrated-assets');
   assert.equal(initialWindow.agentPulseStyle,'subtle-opacity-contrast');
   assert.equal(initialWindow.agentIconVerticalOffset,-2);

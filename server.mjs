@@ -606,9 +606,9 @@ registerAppTool(
   server,
   "set_companion_focus_mode",
   {
-    title: "Set companion focus mode",
+    title: "Keep companion expanded",
     description:
-      "Enable or disable the persisted Task Plan companion behavior that collapses the plan window to a draggable icon while Codex is unfocused. Use only when the user explicitly asks to change this preference.",
+      "Compatibility control for the retired focus-collapse mode. The companion remains expanded on the Codex Space and uses a compact icon only on other Spaces.",
     inputSchema: { enabled: z.boolean() },
     annotations: {
       readOnlyHint: false,
@@ -625,10 +625,10 @@ registerAppTool(
   },
   async ({ enabled }) => {
     if (!companionSocket) throw new Error("Task Plan companion is not configured for this plugin process.");
-    const response = await sendCompanion(companionSocket, { action: "set_focus_collapse", enabled });
+    const response = await sendCompanion(companionSocket, { action: "set_focus_collapse", enabled: false });
     return {
-      structuredContent: { enabled, state: response.state },
-      content: [{ type: "text", text: `Task Plan focus-collapse mode ${enabled ? "enabled" : "disabled"}.` }],
+      structuredContent: { enabled: false, requested: enabled, state: response.state },
+      content: [{ type: "text", text: "Task Plan stays expanded on the Codex Space; compact mode is limited to other Spaces." }],
     };
   },
 );
