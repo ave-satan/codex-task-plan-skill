@@ -27,6 +27,13 @@ async function eventually(read, message, timeout = 12000) {
   throw new Error(`Timed out: ${message}`);
 }
 
+function assertFrameEqual(actual, expected, message) {
+  for (const key of ['x', 'y', 'width', 'height']) {
+    assert.ok(Math.abs(actual[key] - expected[key]) < 1,
+      `${message}: ${key} ${actual[key]} != ${expected[key]}`);
+  }
+}
+
 async function run(command, args) {
   const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
@@ -66,11 +73,12 @@ let resizeURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.resize`)}")
 let minimizeURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.minimize`)}")
 let restoreURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.restore`)}")
 let resetURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.reset`)}")
-let initialFrame = window.frame
+var spaceBaseline = window.frame
 var moveDeltas: [CGFloat] = []
 Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { _ in
   if FileManager.default.fileExists(atPath: moveURL.path) {
     try? FileManager.default.removeItem(at: moveURL)
+    spaceBaseline = window.frame
     moveDeltas = Array(repeating: 15, count: 8)
   }
   if FileManager.default.fileExists(atPath: verticalURL.path) {
@@ -97,7 +105,7 @@ Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { _ in
   if FileManager.default.fileExists(atPath: resetURL.path) {
     try? FileManager.default.removeItem(at: resetURL)
     moveDeltas = []
-    window.setFrame(initialFrame, display: true)
+    window.setFrame(spaceBaseline, display: true)
   }
   if !moveDeltas.isEmpty {
     window.setFrameOrigin(NSPoint(x: window.frame.minX + moveDeltas.removeFirst(),
@@ -282,6 +290,17 @@ try {
   }, 'restored Codex restores the attached expanded plan');
 
   await activate(hostBundle);
+  const beforeSpace = await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.window.presentation === 'expanded'
+      && !state.window.presentationTransitioning && state;
+  }, 'stable plan frame before Space swipe');
+  const frozenFrame = {
+    x: beforeSpace.window.x,
+    y: beforeSpace.window.y,
+    width: beforeSpace.window.width,
+    height: beforeSpace.window.height,
+  };
   await signal(hostBundle, 'space-move');
   const departing = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
@@ -292,6 +311,10 @@ try {
   assert.equal(departing.window.spaceOriginWasCollapsed, false);
   assert.equal(departing.window.spaceRemoteIconVisible, true);
   assert.equal(departing.window.width, 52);
+  assertFrameEqual(departing.window.spaceMirrorFrame, frozenFrame,
+    'host mirror must stay at the pre-swipe frame');
+  assertFrameEqual(departing.window.spaceHostExpandedFrame, frozenFrame,
+    'frozen host frame must not follow the sliding Codex window');
 
   await sendCompanion(socket, { action: 'workspace_transition_probe', name: 'departure-completed' });
   const remote = await eventually(async () => {
@@ -302,13 +325,28 @@ try {
   assert.equal(remote.window.spaceMirrorPresentation, 'expanded');
 
   await signal(hostBundle, 'reset');
-  await sendCompanion(socket, { action: 'workspace_transition_probe', name: 'return-completed' });
+  const restoreResponse = await sendCompanion(socket,
+    { action: 'workspace_transition_probe', name: 'return-completed' });
+  assert.equal(restoreResponse.state.window.hostSpaceRestorePending, true);
+  assertFrameEqual({
+    x: restoreResponse.state.window.x,
+    y: restoreResponse.state.window.y,
+    width: restoreResponse.state.window.width,
+    height: restoreResponse.state.window.height,
+  }, frozenFrame, 'restored plan must appear at the frozen frame immediately');
   const returned = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
     return !state.window.awayFromHostSpace && state.window.presentation === 'expanded'
-      && state.window.panelLevel === 3 && !state.window.spaceMirrorVisible && state;
+      && state.window.panelLevel === 3 && !state.window.spaceMirrorVisible
+      && !state.window.hostSpaceRestorePending && state;
   }, 'return to Codex Space restores the attached expanded panel');
   assert.equal(returned.window.focusCollapseEnabled, false);
+  assertFrameEqual({
+    x: returned.window.x,
+    y: returned.window.y,
+    width: returned.window.width,
+    height: returned.window.height,
+  }, frozenFrame, 'stable post-swipe frame must match the pre-swipe frame');
 
   await sendCompanion(socket, { action: 'remove', id: 'plan-1' });
   await eventually(async () => {

@@ -1432,6 +1432,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var earlyHostDepartureReturnSamples = 0
     var hostSpaceMotionCandidate: HostWindowObservation?
     var hostSpaceMotionSamples = 0
+    var spaceHostExpandedFrame: NSRect?
+    var hostSpaceRestorePending = false
+    var hostSpaceRestoreObservation: HostWindowObservation?
+    var hostSpaceRestoreStableSamples = 0
     var spaceDepartureActive = false
     var spaceArrivalPending = false
     var awayFromHostSpace = false
@@ -2283,10 +2287,18 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hostSpaceID = currentSpace
         spaceDepartureActive = true
         spaceArrivalPending = false
+        let frozenFrame = panel.frame.width >= expandedMinimumSize.width
+            && panel.frame.height >= expandedMinimumSize.height
+            ? panel.frame : (expandedFrame ?? panel.frame)
+        spaceHostExpandedFrame = frozenFrame
+        expandedFrame = frozenFrame
+        hostSpaceRestorePending = false
+        hostSpaceRestoreObservation = nil
+        hostSpaceRestoreStableSamples = 0
         lastEarlyPresentationSignal = "host-window-motion-leaving"
         lastEarlyPresentationSignalAt = Date()
         spaceMirrorState.collapsed = false
-        spaceMirrorPanel.setFrame(panel.frame, display: true)
+        spaceMirrorPanel.setFrame(frozenFrame, display: true)
         spaceMirrorPanel.alphaValue = panel.alphaValue
         spaceMirrorPanel.orderFrontRegardless()
         guard spaceRouter.assign(windowNumber: spaceMirrorPanel.windowNumber, to: [currentSpace]) else {
@@ -2392,6 +2404,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             spaceDepartureActive = false
             awayFromHostSpace = false
             spaceOriginWasCollapsed = nil
+            spaceHostExpandedFrame = nil
+            hostSpaceRestorePending = false
+            hostSpaceRestoreObservation = nil
+            hostSpaceRestoreStableSamples = 0
             hideSpaceMirror()
             syncPresentation()
             journal("space_restore_routing_unavailable")
@@ -2404,6 +2420,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         earlyHostDepartureReturnSamples = 0
         hostSpaceMotionCandidate = nil
         hostSpaceMotionSamples = 0
+        let frozenFrame = spaceHostExpandedFrame ?? expandedFrame ?? panel.frame
         panel.alphaValue = 0
         panel.level = .normal
         guard spaceRouter.assign(windowNumber: panel.windowNumber, to: [hostSpaceID]) else {
@@ -2412,17 +2429,35 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             journal("space_restore_routing_failed")
             return
         }
-        if store.collapsed || collapsingToIcon {
-            expandForHost(animated: false)
-        } else {
-            panel.alphaValue = 1
-            panel.orderFrontRegardless()
-        }
+        presentationAnimationToken += 1
+        presentationTween = nil
+        applyingPresentationFrame = true
+        collapsingToIcon = false
+        store.transitionToCollapsed = false
+        store.transitionIconOnly = false
+        store.collapsed = false
+        store.collapsedHovered = false
+        expandedFromIconSource = nil
+        expandedMovedBeyondSource = false
+        expandedHoverExitStartedAt = nil
+        hostView.resizeEnabled = true
+        hostView.windowDragEnabled = false
+        panel.minSize = collapsedSize
+        panel.setFrame(frozenFrame, display: true)
+        expandedFrame = frozenFrame
+        hostView.rootView = CompanionRootView(store: store)
+        hostView.layoutSubtreeIfNeeded()
+        panel.contentView?.displayIfNeeded()
+        applyingPresentationFrame = false
+        panel.alphaValue = 1
+        orderPanelAboveHost()
         _ = primeRemoteSpaceIcon(hostSpace: hostSpaceID)
         spaceOriginWasCollapsed = nil
         self.hostSpaceID = nil
-        DispatchQueue.main.async { [weak self] in self?.hideSpaceMirror() }
-        if let current = primaryHostWindowObservation() { syncAttachedFrame(to: current) }
+        hideSpaceMirror()
+        hostSpaceRestorePending = true
+        hostSpaceRestoreObservation = nil
+        hostSpaceRestoreStableSamples = 0
         journal(event ?? "space_arrival_restored_expanded")
     }
 
@@ -2479,7 +2514,14 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let hostSpace = hostSpaces.first, hostSpace != currentSpace else { return false }
         let remoteSpaces = spaceRouter.displaySpaces(containing: hostSpace).filter { $0 != hostSpace }
         guard remoteSpaces.contains(currentSpace), !remoteSpaces.isEmpty else { return false }
-        expandedFrame = panel.frame
+        let frozenFrame = panel.frame.width >= expandedMinimumSize.width
+            && panel.frame.height >= expandedMinimumSize.height
+            ? panel.frame : (expandedFrame ?? panel.frame)
+        expandedFrame = frozenFrame
+        spaceHostExpandedFrame = frozenFrame
+        hostSpaceRestorePending = false
+        hostSpaceRestoreObservation = nil
+        hostSpaceRestoreStableSamples = 0
         hostSpaceID = hostSpace
         spaceOriginWasCollapsed = false
         awayFromHostSpace = true
@@ -2489,6 +2531,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             awayFromHostSpace = false
             hostSpaceID = nil
             spaceOriginWasCollapsed = nil
+            spaceHostExpandedFrame = nil
             return false
         }
         panel.alphaValue = 0.82
@@ -2552,6 +2595,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             earlyHostDepartureReturnSamples = 0
             hostSpaceMotionCandidate = nil
             hostSpaceMotionSamples = 0
+            spaceHostExpandedFrame = nil
+            hostSpaceRestorePending = false
+            hostSpaceRestoreObservation = nil
+            hostSpaceRestoreStableSamples = 0
             hostMinimizeBaseline = nil
             hostMinimizeCandidateSamples = 0
             hostMinimizingActive = false
@@ -2578,7 +2625,63 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         defer { lastHostWindowObservation = current }
         let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
 
-        if !hostWindowMinimized, let current {
+        if hostSpaceRestorePending {
+            guard let current else {
+                hostSpaceRestoreObservation = nil
+                hostSpaceRestoreStableSamples = 0
+                return
+            }
+            if let previous = hostSpaceRestoreObservation,
+               previous.id == current.id,
+               abs(current.frame.minX - previous.frame.minX) <= 1,
+               abs(current.frame.minY - previous.frame.minY) <= 1,
+               abs(current.frame.width - previous.frame.width) <= 1,
+               abs(current.frame.height - previous.frame.height) <= 1 {
+                hostSpaceRestoreStableSamples += 1
+            } else {
+                hostSpaceRestoreStableSamples = 0
+            }
+            hostSpaceRestoreObservation = current
+            guard hostSpaceRestoreStableSamples >= 2 else { return }
+            hostSpaceRestorePending = false
+            hostSpaceRestoreObservation = nil
+            hostSpaceRestoreStableSamples = 0
+            spaceHostExpandedFrame = nil
+            journal("space_host_geometry_stable")
+        }
+
+        var suppressAttachmentSync = false
+        if front == hostBundle, !spaceDepartureActive, !awayFromHostSpace,
+           NSEvent.pressedMouseButtons & 1 == 0,
+           let previous = lastHostWindowObservation, let current,
+           previous.id == current.id {
+            let deltaX = current.frame.minX - previous.frame.minX
+            let deltaY = current.frame.minY - previous.frame.minY
+            if abs(deltaX) >= 4, abs(deltaX) > abs(deltaY) * 2 {
+                if hostSpaceMotionCandidate?.id != current.id {
+                    hostSpaceMotionCandidate = previous
+                    hostSpaceMotionSamples = 1
+                } else {
+                    hostSpaceMotionSamples += 1
+                }
+                suppressAttachmentSync = true
+                if let baseline = hostSpaceMotionCandidate,
+                   hostSpaceMotionSamples >= 2,
+                   abs(current.frame.minX - baseline.frame.minX) >= 24 {
+                    earlyHostDepartureBaseline = baseline
+                    earlyHostDepartureReturnSamples = 0
+                    hostSpaceMotionCandidate = nil
+                    hostSpaceMotionSamples = 0
+                    beginSpaceDeparture()
+                    return
+                }
+            } else {
+                hostSpaceMotionCandidate = nil
+                hostSpaceMotionSamples = 0
+            }
+        }
+
+        if !hostWindowMinimized, !suppressAttachmentSync, let current {
             syncAttachedFrame(to: current)
         }
 
@@ -2635,35 +2738,6 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             hostMinimizeCandidateSamples = 0
             hostMinimizeBaseline = nil
-        }
-
-        if front == hostBundle, !spaceDepartureActive, !awayFromHostSpace,
-           NSEvent.pressedMouseButtons & 1 == 0,
-           let previous = lastHostWindowObservation, let current,
-           previous.id == current.id {
-            let deltaX = current.frame.minX - previous.frame.minX
-            let deltaY = current.frame.minY - previous.frame.minY
-            if abs(deltaX) >= 4, abs(deltaX) > abs(deltaY) * 2 {
-                if hostSpaceMotionCandidate?.id != current.id {
-                    hostSpaceMotionCandidate = previous
-                    hostSpaceMotionSamples = 1
-                } else {
-                    hostSpaceMotionSamples += 1
-                }
-                if let baseline = hostSpaceMotionCandidate,
-                   hostSpaceMotionSamples >= 2,
-                   abs(current.frame.minX - baseline.frame.minX) >= 24 {
-                    earlyHostDepartureBaseline = baseline
-                    earlyHostDepartureReturnSamples = 0
-                    hostSpaceMotionCandidate = nil
-                    hostSpaceMotionSamples = 0
-                    beginSpaceDeparture()
-                    return
-                }
-            } else {
-                hostSpaceMotionCandidate = nil
-                hostSpaceMotionSamples = 0
-            }
         }
 
         if front == hostBundle, spaceDepartureActive,
@@ -3108,6 +3182,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "spaceArrivalPending": spaceArrivalPending,
                                      "awayFromHostSpace": awayFromHostSpace,
                                      "spaceOriginWasCollapsed": spaceOriginWasCollapsed ?? NSNull(),
+                                     "spaceHostExpandedFrame": spaceHostExpandedFrame.map {
+                                        ["x": $0.minX, "y": $0.minY,
+                                         "width": $0.width, "height": $0.height]
+                                     } ?? NSNull(),
+                                     "hostSpaceRestorePending": hostSpaceRestorePending,
+                                     "hostSpaceRestoreStableSamples": hostSpaceRestoreStableSamples,
                                      "spaceRoutingAvailable": spaceRouter != nil,
                                      "hostSpaceID": hostSpaceID ?? NSNull(),
                                      "spaceMirrorVisible": spaceMirrorVisible,
