@@ -73,13 +73,28 @@ let resizeURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.resize`)}")
 let minimizeURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.minimize`)}")
 let restoreURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.restore`)}")
 let resetURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.reset`)}")
+let overviewURL = URL(fileURLWithPath: "${join(fixture, `${bundle}.overview-move`)}")
 var spaceBaseline = window.frame
 var moveDeltas: [CGFloat] = []
+var overviewFrames: [NSRect] = []
 Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { _ in
   if FileManager.default.fileExists(atPath: moveURL.path) {
     try? FileManager.default.removeItem(at: moveURL)
     spaceBaseline = window.frame
     moveDeltas = Array(repeating: 15, count: 8)
+  }
+  if FileManager.default.fileExists(atPath: overviewURL.path) {
+    try? FileManager.default.removeItem(at: overviewURL)
+    spaceBaseline = window.frame
+    overviewFrames = []
+    for step in 1...8 {
+      let offset = CGFloat(step)
+      let origin = NSPoint(x: spaceBaseline.minX + offset * 15,
+                           y: spaceBaseline.minY + offset * 2)
+      let size = NSSize(width: spaceBaseline.width - offset * 13,
+                        height: spaceBaseline.height - offset * 10)
+      overviewFrames.append(NSRect(origin: origin, size: size))
+    }
   }
   if FileManager.default.fileExists(atPath: verticalURL.path) {
     try? FileManager.default.removeItem(at: verticalURL)
@@ -105,7 +120,11 @@ Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { _ in
   if FileManager.default.fileExists(atPath: resetURL.path) {
     try? FileManager.default.removeItem(at: resetURL)
     moveDeltas = []
+    overviewFrames = []
     window.setFrame(spaceBaseline, display: true)
+  }
+  if !overviewFrames.isEmpty {
+    window.setFrame(overviewFrames.removeFirst(), display: true)
   }
   if !moveDeltas.isEmpty {
     window.setFrameOrigin(NSPoint(x: window.frame.minX + moveDeltas.removeFirst(),
@@ -208,7 +227,8 @@ try {
   assert.equal(attached.window.focusCollapseEnabled, false);
   assert.equal(attached.window.focusPresentationBehavior,
     'expanded-on-host-space-no-focus-collapse');
-  assert.equal(attached.window.panelLevel, 3);
+  assert.equal(attached.window.panelLevel, 3,
+    `host activation must float the panel; frontmost=${attached.frontmostBundle}`);
 
   await activate(awayBundle);
   const unfocused = await eventually(async () => {
@@ -275,6 +295,40 @@ try {
   }, 'independent plan resize updates its attachment');
   assert.ok(independentlyResized.window.hostAttachment.width
     > independentlyMoved.window.hostAttachment.width);
+
+  const beforeOverview = (await sendCompanion(socket, { action: 'status' })).state;
+  const overviewFrame = {
+    x: beforeOverview.window.x,
+    y: beforeOverview.window.y,
+    width: beforeOverview.window.width,
+    height: beforeOverview.window.height,
+  };
+  await signal(hostBundle, 'overview-move');
+  const overview = await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.window.hostMinimizingActive && !state.visible && state;
+  }, 'Mission Control-like host scaling hides the plan');
+  assert.equal(overview.window.spaceDepartureActive, false,
+    'scaling plus translation must not be mistaken for a Space swipe');
+  assert.equal(overview.window.spaceMirrorVisible, false);
+  assertFrameEqual({
+    x: overview.window.x,
+    y: overview.window.y,
+    width: overview.window.width,
+    height: overview.window.height,
+  }, overviewFrame, 'overview transform must not change the attached plan frame');
+  await delay(700);
+  const overviewStable = (await sendCompanion(socket, { action: 'status' })).state;
+  assert.equal(overviewStable.visible, false,
+    'the plan must stay hidden while the scaled overview thumbnail remains');
+  assert.equal(overviewStable.window.spaceDepartureActive, false);
+  assert.equal(overviewStable.window.spaceMirrorVisible, false);
+  await signal(hostBundle, 'reset');
+  await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return !state.window.hostMinimizingActive && state.visible
+      && !state.window.spaceDepartureActive && state;
+  }, 'plan returns after the host leaves overview');
 
   await signal(hostBundle, 'minimize');
   await eventually(async () => {

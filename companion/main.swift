@@ -1445,6 +1445,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var spaceRemoteIconVisible = false
     var hostMinimizeBaseline: HostWindowObservation?
     var hostMinimizeCandidateSamples = 0
+    var hostRestoreFullSizeSamples = 0
     var hostMinimizingActive = false
     var hostWindowMinimized = false
     var lastHostMinimizeTrigger: String?
@@ -2467,6 +2468,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hostMinimizingActive = true
         hostWindowMinimized = false
         hostMinimizeCandidateSamples = 0
+        hostRestoreFullSizeSamples = 0
         lastHostMinimizeTrigger = trigger
         lastEarlyPresentationSignal = "host-window-minimizing"
         lastEarlyPresentationSignalAt = Date()
@@ -2479,6 +2481,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hostWindowMinimized = false
         hostMinimizingActive = false
         hostMinimizeCandidateSamples = 0
+        hostRestoreFullSizeSamples = 0
         lastEarlyPresentationSignal = "host-window-restoring"
         lastEarlyPresentationSignalAt = Date()
         panel.level = .normal
@@ -2601,6 +2604,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             hostSpaceRestoreStableSamples = 0
             hostMinimizeBaseline = nil
             hostMinimizeCandidateSamples = 0
+            hostRestoreFullSizeSamples = 0
             hostMinimizingActive = false
             hostWindowMinimized = false
             spaceDepartureActive = false
@@ -2651,13 +2655,30 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         var suppressAttachmentSync = false
+        if front == hostBundle, !store.collapsed, !collapsingToIcon,
+           NSEvent.pressedMouseButtons & 1 == 0,
+           let previous = lastHostWindowObservation, let current,
+           previous.id == current.id,
+           current.frame.width - previous.frame.width <= -8,
+           current.frame.height - previous.frame.height <= -6 {
+            // Mission Control scales the host thumbnail while moving it. Do not
+            // resize the attached panel to that temporary thumbnail geometry.
+            suppressAttachmentSync = true
+        }
         if front == hostBundle, !spaceDepartureActive, !awayFromHostSpace,
            NSEvent.pressedMouseButtons & 1 == 0,
            let previous = lastHostWindowObservation, let current,
            previous.id == current.id {
             let deltaX = current.frame.minX - previous.frame.minX
             let deltaY = current.frame.minY - previous.frame.minY
-            if abs(deltaX) >= 4, abs(deltaX) > abs(deltaY) * 2 {
+            let candidateSizeUnchanged = hostSpaceMotionCandidate.map { candidate in
+                abs(current.frame.width - candidate.frame.width) <= 2
+                    && abs(current.frame.height - candidate.frame.height) <= 2
+            } ?? true
+            let sizeUnchanged = abs(current.frame.width - previous.frame.width) <= 2
+                && abs(current.frame.height - previous.frame.height) <= 2
+                && candidateSizeUnchanged
+            if sizeUnchanged, abs(deltaX) >= 4, abs(deltaX) > abs(deltaY) * 2 {
                 if hostSpaceMotionCandidate?.id != current.id {
                     hostSpaceMotionCandidate = previous
                     hostSpaceMotionSamples = 1
@@ -2681,29 +2702,42 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
-        if !hostWindowMinimized, !suppressAttachmentSync, let current {
+        if !hostWindowMinimized, !hostMinimizingActive,
+           !suppressAttachmentSync, let current {
             syncAttachedFrame(to: current)
         }
 
-        if hostWindowMinimized, lastHostWindowObservation == nil, current != nil {
-            beginHostRestore()
-            return
+        if hostWindowMinimized, let current {
+            let returnedToFullSize = hostMinimizeBaseline.map { baseline in
+                baseline.id != current.id
+                    || current.frame.width * current.frame.height
+                        >= baseline.frame.width * baseline.frame.height * 0.98
+            } ?? true
+            hostRestoreFullSizeSamples = returnedToFullSize ? hostRestoreFullSizeSamples + 1 : 0
+            if hostRestoreFullSizeSamples >= 3 {
+                beginHostRestore()
+                return
+            }
         }
         if hostMinimizingActive {
             if current == nil {
                 hostMinimizingActive = false
                 hostWindowMinimized = true
+                hostRestoreFullSizeSamples = 0
                 journal("host_minimized")
-            } else if let baseline = hostMinimizeBaseline,
-                      current!.id == baseline.id,
-                      current!.frame.width * current!.frame.height
-                        >= baseline.frame.width * baseline.frame.height * 0.98 {
+            } else if let baseline = hostMinimizeBaseline, let current {
+                let returnedToFullSize = current.id == baseline.id
+                    && current.frame.width * current.frame.height
+                        >= baseline.frame.width * baseline.frame.height * 0.98
+                hostRestoreFullSizeSamples = returnedToFullSize ? hostRestoreFullSizeSamples + 1 : 0
+                guard hostRestoreFullSizeSamples >= 3 else { return }
                 hostMinimizingActive = false
                 hostWindowMinimized = false
                 hostMinimizeBaseline = nil
+                hostRestoreFullSizeSamples = 0
                 if store.collapsed { expandForHost(animated: false) }
                 else { panel.alphaValue = 1; orderPanelAboveHost() }
-                syncAttachedFrame(to: current!)
+                syncAttachedFrame(to: current)
                 journal("host_minimize_cancelled")
             }
             return
@@ -2769,6 +2803,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if lastVisibility != false { lastVisibility = false; journal("visibility") }
             return
         }
+        if hostMinimizingActive || hostWindowMinimized { return }
         if routeToHostSpaceIfNeeded() { return }
         if spaceDepartureActive {
             return
