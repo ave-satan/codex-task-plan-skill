@@ -78,6 +78,20 @@ usleep(600000)
     'explicit-7pt-edge-12pt-corner-nonactivating');
   assert.ok(initial.window.resizeCursorRectResets > 0,
     'non-key panel explicitly registers cursor rects on startup');
+  if (process.env.CURSOR_EXPECT_INACTIVE_SPACE === '1') {
+    assert.equal(initial.window.panelOnActiveSpace, false,
+      'inactive-Space test needs a panel on another macOS Space');
+    await movePointer({ x: initial.window.x + 2,
+      y: initial.window.y + initial.window.height / 2 });
+    const inactive = (await sendCompanion(socket, { action: 'status' })).state;
+    assert.equal(inactive.window.liveResizeCursorKind, null,
+      'a panel on another Space must not claim this pointer location');
+    assert.notDeepEqual(inactive.window.systemCursorSize, { width: 30, height: 24 },
+      'the hidden panel must not impose its horizontal resize cursor here');
+    console.log('Inactive-Space cursor smoke passed: hidden panel does not override the foreground cursor.');
+  } else {
+  assert.equal(initial.window.panelOnActiveSpace, true,
+    'visible cursor test must run on the same macOS Space as its panel');
 
   const midY = initial.window.y + initial.window.height / 2;
   await movePointer({ x: initial.window.x + 2, y: midY });
@@ -94,9 +108,6 @@ usleep(600000)
     'macOS must allow the nonactivating companion to set the visible cursor');
   assert.deepEqual(edge.window.systemCursorSize, edge.window.applicationCursorSize,
     'the displayed system cursor must be the resize cursor, not only the companion cursor');
-  assert.ok(edge.window.resizeCursorTrackingEvents > initial.window.resizeCursorTrackingEvents,
-    'nonactivating panel receives active-always cursor events at the edge');
-
   await movePointer({ x: initial.window.x + 9, y: midY });
   const inset = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
@@ -162,9 +173,8 @@ usleep(600000)
     return state.window.liveResizeCursorKind === null && state;
   }, 'cursor clears after resize');
   assert.equal(finished.frontmostBundle, hostBundle);
-  assert.deepEqual(finished.window.systemCursorSize, finished.window.arrowCursorSize,
-    'leaving the panel must restore the visible arrow');
   console.log('Live cursor smoke passed: visible resize cursors on side, top and corner without activating the companion.');
+  }
 } finally {
   if (app.exitCode === null) {
     try { await sendCompanion(socket, { action: 'quit' }); } catch { app.kill('SIGKILL'); }

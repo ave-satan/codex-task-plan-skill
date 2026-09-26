@@ -3090,7 +3090,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func liveResizeCursorKind(at point: NSPoint) -> String? {
-        guard panel?.isVisible == true, !store.collapsed, hostView.resizeEnabled else { return nil }
+        guard panel?.isVisible == true, panel.isOnActiveSpace,
+              !store.collapsed, hostView.resizeEnabled else { return nil }
         let frame = panel.frame
         let edge = PanelMetrics.resizeEdge
         let corner = PanelMetrics.resizeCorner
@@ -3112,6 +3113,13 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return nil
     }
     func syncLiveResizeCursor() {
+        // A visible window can still belong to another Space. Never impose
+        // its resize cursor on the app underneath the pointer in this Space.
+        guard panel?.isOnActiveSpace == true else {
+            liveCursorKind = nil
+            suppressingFallbackResizeCursor = false
+            return
+        }
         if store.collapsed || !hostView.resizeEnabled {
             if liveCursorKind != nil || suppressingFallbackResizeCursor {
                 liveCursorKind = nil
