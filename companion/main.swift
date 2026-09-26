@@ -1449,6 +1449,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var hostMinimizingActive = false
     var hostWindowMinimized = false
     var lastHostMinimizeTrigger: String?
+    var missionControlSuspended = false
+    var missionControlLastOverlayAt: Date?
+    let missionControlExitGrace: TimeInterval = 0.65
+    let missionControlTestMarker = ProcessInfo.processInfo.environment["PLAN_COMPANION_TEST_MISSION_CONTROL_MARKER"]
     var hostAttachment: HostAttachment?
     var applyingHostAttachmentFrame = false
     let retentionSeconds = max(0.1, Double(ProcessInfo.processInfo.environment["PLAN_COMPANION_RETENTION_SECONDS"] ?? "") ?? 30)
@@ -1667,6 +1671,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             guard let self else { return }
             self.workspaceGestureGeneration += 1
+            if self.updateMissionControlSuspension() { return }
             let hostActivated = app?.bundleIdentifier == self.hostBundle
             if hostActivated, self.spaceArrivalPending || self.awayFromHostSpace {
                 self.restoreHostSpacePresentation()
@@ -1696,6 +1701,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                              object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             self.workspaceGestureGeneration += 1
+            if self.updateMissionControlSuspension() { return }
             if let hostSpaceID = self.hostSpaceID,
                self.spaceRouter?.activeSpace() == hostSpaceID {
                 self.restoreHostSpacePresentation()
@@ -2273,6 +2279,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func beginSpaceDeparture() {
         guard store.active != nil, !dismissed else { return }
+        guard !updateMissionControlSuspension(), !hostMinimizingActive,
+              !hostWindowMinimized else { return }
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == hostBundle else { return }
         guard !spaceDepartureActive, !awayFromHostSpace else { return }
         guard let spaceRouter, let currentSpace = spaceRouter.activeSpace() else {
@@ -2336,7 +2344,75 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         spaceRemoteIconVisible = false
     }
 
+    func missionControlOverlayVisible() -> Bool {
+        if let missionControlTestMarker,
+           FileManager.default.fileExists(atPath: missionControlTestMarker) { return true }
+        guard let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
+                as? [[String: Any]] else { return false }
+        var layer18 = 0
+        var layer20 = 0
+        for row in rows where row[kCGWindowOwnerName as String] as? String == "Dock" {
+            switch (row[kCGWindowLayer as String] as? NSNumber)?.intValue {
+            case 18: layer18 += 1
+            case 20: layer20 += 1
+            default: break
+            }
+        }
+        // Dock's Mission Control overlay has more layer-20 windows than
+        // layer-18 windows. This was observed on the installed macOS build.
+        return layer18 > 0 && layer20 > layer18
+    }
+
+    @discardableResult func updateMissionControlSuspension() -> Bool {
+        let now = Date()
+        let overlayVisible = missionControlOverlayVisible()
+        if overlayVisible { missionControlLastOverlayAt = now }
+        let withinExitGrace = missionControlSuspended
+            && missionControlLastOverlayAt.map { now.timeIntervalSince($0) < missionControlExitGrace } == true
+        if overlayVisible || withinExitGrace {
+            if !missionControlSuspended {
+                missionControlSuspended = true
+                hostSpaceMotionCandidate = nil
+                hostSpaceMotionSamples = 0
+                if hostMinimizingActive, lastHostMinimizeTrigger == "proportional-shrink" {
+                    hostMinimizingActive = false
+                    hostWindowMinimized = false
+                    hostMinimizeBaseline = nil
+                    hostMinimizeCandidateSamples = 0
+                    hostRestoreFullSizeSamples = 0
+                }
+                panel?.orderOut(nil)
+                hideSpaceMirror()
+                hideRemoteSpaceIcon()
+                journal("mission_control_hidden")
+            }
+            return true
+        }
+        guard missionControlSuspended else { return false }
+        missionControlSuspended = false
+        missionControlLastOverlayAt = nil
+        hostWindowObservationInitialized = false
+        lastHostWindowObservation = nil
+        hostSpaceMotionCandidate = nil
+        hostSpaceMotionSamples = 0
+        journal("mission_control_exited")
+        if spaceDepartureActive {
+            if let hostSpaceID, spaceRouter?.activeSpace() == hostSpaceID {
+                restoreHostSpacePresentation()
+            } else {
+                finishSpaceDeparture()
+            }
+        } else if awayFromHostSpace, let hostSpaceID,
+                  spaceRouter?.activeSpace() == hostSpaceID {
+            restoreHostSpacePresentation()
+        } else {
+            syncPresentation()
+        }
+        return true
+    }
+
     @discardableResult func primeRemoteSpaceIcon(hostSpace explicitHostSpace: UInt64? = nil) -> Bool {
+        guard !missionControlSuspended else { return false }
         guard store.active != nil, !dismissed,
               let spaceRouter,
               let hostSpace = explicitHostSpace ?? spaceRouter.activeSpace() else {
@@ -2375,6 +2451,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func finishSpaceDeparture() {
+        if updateMissionControlSuspension() { return }
         guard spaceDepartureActive else { return }
         spaceDepartureActive = false
         awayFromHostSpace = true
@@ -2400,6 +2477,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func restoreHostSpacePresentation(event: String? = nil) {
+        if updateMissionControlSuspension() { return }
         guard let hostSpaceID, let spaceRouter else {
             spaceArrivalPending = false
             spaceDepartureActive = false
@@ -2576,6 +2654,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func orderPanelAboveHost() {
+        guard !missionControlSuspended else { return }
         if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == hostBundle {
             panel.level = .floating
             panel.orderFrontRegardless()
@@ -2589,6 +2668,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func syncWorkspaceWindowMotion() {
         guard panel != nil, store.active != nil, !dismissed else {
+            missionControlSuspended = false
+            missionControlLastOverlayAt = nil
             if let hostSpaceID, let spaceRouter, panel != nil {
                 _ = spaceRouter.assign(windowNumber: panel.windowNumber, to: [hostSpaceID])
             }
@@ -2619,6 +2700,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let now = Date()
         guard now.timeIntervalSince(lastHostWindowPollAt) >= 1.0 / 30.0 else { return }
         lastHostWindowPollAt = now
+        if updateMissionControlSuspension() { return }
         let current = primaryHostWindowObservation()
         guard hostWindowObservationInitialized else {
             hostWindowObservationInitialized = true
@@ -2791,6 +2873,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func syncPresentation(hostDidActivate: Bool = false) {
         guard panel != nil else { return }
+        if updateMissionControlSuspension() { return }
         if applyingPresentationFrame {
             pendingPresentationSync = true
             panel.orderFrontRegardless()
@@ -3249,6 +3332,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "lastHostMinimizeTrigger": lastHostMinimizeTrigger ?? NSNull(),
                                      "hostMinimizingActive": hostMinimizingActive,
                                      "hostWindowMinimized": hostWindowMinimized,
+                                     "missionControlSuspended": missionControlSuspended,
+                                     "missionControlExitGrace": missionControlExitGrace,
                                      "hostWindowObservationInitialized": hostWindowObservationInitialized,
                                      "hostWindowObservation": lastHostWindowObservation.map {
                                         ["id": $0.id, "x": $0.frame.minX, "y": $0.frame.minY,

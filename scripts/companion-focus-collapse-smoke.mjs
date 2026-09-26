@@ -15,6 +15,7 @@ const hostBundle = 'local.taskplan.focus-host';
 const awayBundle = 'local.taskplan.focus-away';
 const fixture = await mkdtemp('/tmp/taskplan-host-attachment-');
 const socket = join(fixture, 'control.sock');
+const missionControlMarker = join(fixture, 'mission-control.active');
 const root = fileURLToPath(new URL('..', import.meta.url));
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -193,6 +194,7 @@ const app = spawn(binary, [], { env: {
   PLAN_COMPANION_DATA: fixture,
   PLAN_COMPANION_SOCKET: socket,
   PLAN_COMPANION_HOST: hostBundle,
+  PLAN_COMPANION_TEST_MISSION_CONTROL_MARKER: missionControlMarker,
   PLAN_COMPANION_RETENTION_SECONDS: '10',
 }, stdio: ['ignore', 'pipe', 'pipe'] });
 let client;
@@ -329,6 +331,30 @@ try {
     return !state.window.hostMinimizingActive && state.visible
       && !state.window.spaceDepartureActive && state;
   }, 'plan returns after the host leaves overview');
+
+  await writeFile(missionControlMarker, '1');
+  await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.window.missionControlSuspended && !state.visible
+      && !state.window.spaceMirrorVisible && !state.window.spaceRemoteIconVisible && state;
+  }, 'Mission Control hides all plan windows');
+  await signal(hostBundle, 'space-move');
+  await sendCompanion(socket, { action: 'workspace_transition_probe', name: 'departure-completed' });
+  await delay(700);
+  const insideMissionControl = (await sendCompanion(socket, { action: 'status' })).state;
+  assert.equal(insideMissionControl.window.missionControlSuspended, true);
+  assert.equal(insideMissionControl.visible, false,
+    'Space motion inside Mission Control must not reveal the plan');
+  assert.equal(insideMissionControl.window.spaceDepartureActive, false);
+  assert.equal(insideMissionControl.window.spaceMirrorVisible, false);
+  assert.equal(insideMissionControl.window.spaceRemoteIconVisible, false);
+  await rm(missionControlMarker);
+  await signal(hostBundle, 'reset');
+  await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return !state.window.missionControlSuspended && state.visible
+      && state.window.presentation === 'expanded' && state;
+  }, 'plan reappears only after Mission Control exits');
 
   await signal(hostBundle, 'minimize');
   await eventually(async () => {
