@@ -49,10 +49,14 @@ const app = spawn(binary, [], { env: {
   PLAN_COMPANION_HOST: hostBundle,
   PLAN_COMPANION_DISABLE_SPACE_ROUTING: '1',
 }, stdio: ['ignore', 'pipe', 'pipe'] });
+let appStderr = '';
+app.stderr.on('data', chunk => { appStderr += chunk; });
 
 try {
   await eventually(async () => (await sendCompanion(socket, { action: 'status' })).ok,
-    'companion startup');
+    'companion startup').catch(error => {
+      throw new Error(`${error.message}: stderr=${appStderr}, exit=${app.exitCode}, signal=${app.signalCode}`);
+    });
   await sendCompanion(socket, { action: 'upsert', plan: {
     id: 'cursor-live', title: 'Cursor live', revision: 1, status: 'active',
     steps: [{ id: 'one', title: 'Hover edge', status: 'pending' }],
@@ -84,14 +88,22 @@ usleep(600000)
   assert.equal(edge.frontmostBundle, hostBundle,
     'resize cursor hover must not activate the companion or flash Codex traffic lights');
   assert.equal(edge.window.resizeCursorActivatesApplication, false);
+  assert.equal(edge.window.isKeyWindow, false, 'hover must keep the plan panel non-key');
+  assert.equal(edge.window.applicationIsActive, false, 'hover must keep the companion inactive');
+  assert.equal(edge.window.backgroundCursorUpdatesEnabled, true,
+    'macOS must allow the nonactivating companion to set the visible cursor');
+  assert.deepEqual(edge.window.systemCursorSize, edge.window.applicationCursorSize,
+    'the displayed system cursor must be the resize cursor, not only the companion cursor');
   assert.ok(edge.window.resizeCursorTrackingEvents > initial.window.resizeCursorTrackingEvents,
     'nonactivating panel receives active-always cursor events at the edge');
 
   await movePointer({ x: initial.window.x + 9, y: midY });
-  await eventually(async () => {
+  const inset = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
     return state.window.liveResizeCursorKind === null && state;
   }, 'resize cursor clears beyond the reduced inner edge');
+  assert.deepEqual(inset.window.systemCursorSize, inset.window.arrowCursorSize,
+    'leaving the resize edge must restore the visible arrow');
 
   await movePointer({ x: initial.window.x - 2, y: midY });
   await eventually(async () => {
@@ -122,10 +134,27 @@ usleep(600000)
     width: horizontal.window.width,
     height: horizontal.window.height + 20,
   });
-  await eventually(async () => {
+  const vertical = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
     return state.window.height > horizontal.window.height + 10 && state;
   }, 'top-edge drag resizes the plan vertically');
+  await movePointer({ x: vertical.window.x + vertical.window.width / 2,
+    y: vertical.window.y + vertical.window.height - 2 });
+  const topEdge = await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.window.liveResizeCursorKind === 'top' && state;
+  }, 'top resize cursor inside the 7pt edge');
+  assert.deepEqual(topEdge.window.systemCursorSize, topEdge.window.applicationCursorSize,
+    'top edge must show the vertical resize cursor');
+
+  await movePointer({ x: vertical.window.x + 2,
+    y: vertical.window.y + vertical.window.height - 2 });
+  const corner = await eventually(async () => {
+    const state = (await sendCompanion(socket, { action: 'status' })).state;
+    return state.window.liveResizeCursorKind === 'top-left' && state;
+  }, 'corner resize cursor inside the 12pt corner');
+  assert.deepEqual(corner.window.systemCursorSize, corner.window.applicationCursorSize,
+    'corner must show the diagonal resize cursor');
 
   await movePointer({ x: 100, y: 100 });
   const finished = await eventually(async () => {
@@ -133,7 +162,9 @@ usleep(600000)
     return state.window.liveResizeCursorKind === null && state;
   }, 'cursor clears after resize');
   assert.equal(finished.frontmostBundle, hostBundle);
-  console.log('Live cursor smoke passed: reduced resize zone, constrained frame changes, and nonactivating hover.');
+  assert.deepEqual(finished.window.systemCursorSize, finished.window.arrowCursorSize,
+    'leaving the panel must restore the visible arrow');
+  console.log('Live cursor smoke passed: visible resize cursors on side, top and corner without activating the companion.');
 } finally {
   if (app.exitCode === null) {
     try { await sendCompanion(socket, { action: 'quit' }); } catch { app.kill('SIGKILL'); }

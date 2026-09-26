@@ -1143,6 +1143,28 @@ final class PlanPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+// The plan is intentionally a nonactivating panel. AppKit still processes its
+// mouse events, but the foreground Codex process otherwise owns the visible
+// cursor. This private, connection-scoped property lets our resize cursors be
+// displayed without activating the companion. If it disappears in a future
+// macOS release, keep the panel and its drag-resize behavior working.
+private func enableBackgroundCursorUpdates() -> Bool {
+    guard let skyLight = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_NOW) else {
+        return false
+    }
+    defer { dlclose(skyLight) }
+    guard let getConnectionSymbol = dlsym(skyLight, "_CGSDefaultConnection"),
+          let setPropertySymbol = dlsym(skyLight, "CGSSetConnectionProperty") else {
+        return false
+    }
+    typealias GetConnection = @convention(c) () -> Int32
+    typealias SetProperty = @convention(c) (Int32, Int32, CFString, CFBoolean) -> Int32
+    let getConnection = unsafeBitCast(getConnectionSymbol, to: GetConnection.self)
+    let setProperty = unsafeBitCast(setPropertySymbol, to: SetProperty.self)
+    let connection = getConnection()
+    return setProperty(connection, connection, "SetsCursorInBackground" as CFString, kCFBooleanTrue) == 0
+}
+
 struct PlanTooltipContent: View {
     var title: String
 
@@ -1422,6 +1444,7 @@ final class PanelHostingView<Content: View>: NSHostingView<Content> {
 
 final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let store = Store()
+    private(set) var backgroundCursorUpdatesEnabled = false
     var panel: PlanPanel!
     var hostView: PanelHostingView<CompanionRootView>!
     let spaceRouter: SpaceWindowRouter? = ProcessInfo.processInfo.environment["PLAN_COMPANION_DISABLE_SPACE_ROUTING"] == "1"
@@ -1553,6 +1576,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let env = ProcessInfo.processInfo.environment
+        backgroundCursorUpdatesEnabled = enableBackgroundCursorUpdates()
         let codexHome = env["CODEX_HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex").path
         let data = env["PLAN_COMPANION_DATA"] ?? codexHome + "/task-plan/companion"
         let socket = env["PLAN_COMPANION_SOCKET"] ?? data + "/control.sock"
@@ -3268,6 +3292,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let window: [String: Any] = ["systemTitleVisible": false,
                                      "activationStyle": "nonactivating-panel",
                                      "canBecomeKey": panel?.canBecomeKey ?? true,
+                                     "isKeyWindow": panel?.isKeyWindow ?? false,
+                                     "applicationIsActive": NSApp.isActive,
+                                     "backgroundCursorUpdatesEnabled": backgroundCursorUpdatesEnabled,
+                                     "systemCursorSize": NSCursor.currentSystem.map { ["width": $0.image.size.width, "height": $0.image.size.height] } ?? NSNull(),
+                                     "applicationCursorSize": ["width": NSCursor.current.image.size.width, "height": NSCursor.current.image.size.height],
+                                     "arrowCursorSize": ["width": NSCursor.arrow.image.size.width, "height": NSCursor.arrow.image.size.height],
                                      "clickKeepsVisible": true,
                                      "resizable": hostView?.resizeEnabled ?? false,
                                      "nativeResizableStyleMask": panel?.styleMask.contains(.resizable) ?? false,
