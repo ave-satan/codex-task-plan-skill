@@ -1263,7 +1263,18 @@ final class PlanTooltipPanel {
 
 final class PanelHostingView<Content: View>: NSHostingView<Content> {
     let resizeCursorZoneCount = 8
-    var resizeEnabled = true
+    private(set) var cursorRectResetCount = 0
+    private(set) var cursorTrackingEventCount = 0
+    private var resizeTrackingArea: NSTrackingArea?
+    private var trackedResizeCursorKind: String?
+    var resizeEnabled = true {
+        didSet {
+            guard resizeEnabled != oldValue else { return }
+            // This nonactivating panel never becomes key, so AppKit will not
+            // rebuild invalid cursor rects for us after a presentation change.
+            window?.resetCursorRects()
+        }
+    }
     var windowDragEnabled = false
     var frameConstraint: ((NSRect) -> NSRect)?
 
@@ -1273,6 +1284,42 @@ final class PanelHostingView<Content: View>: NSHostingView<Content> {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.acceptsMouseMovedEvents = true
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let resizeTrackingArea { removeTrackingArea(resizeTrackingArea) }
+        let area = NSTrackingArea(rect: .zero,
+                                  options: [.cursorUpdate, .mouseMoved, .mouseEnteredAndExited,
+                                            .activeAlways, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        resizeTrackingArea = area
+    }
+
+    private func updateTrackedResizeCursor(for event: NSEvent) {
+        cursorTrackingEventCount += 1
+        let point = convert(event.locationInWindow, from: nil)
+        let kind = resizeCursorKind(at: point)
+        if let kind { resizeCursor(for: kind).set() }
+        else if trackedResizeCursorKind != nil { NSCursor.arrow.set() }
+        trackedResizeCursorKind = kind
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        super.cursorUpdate(with: event)
+        updateTrackedResizeCursor(for: event)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        updateTrackedResizeCursor(for: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        if trackedResizeCursorKind != nil { NSCursor.arrow.set() }
+        trackedResizeCursorKind = nil
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -1354,6 +1401,7 @@ final class PanelHostingView<Content: View>: NSHostingView<Content> {
     override func resetCursorRects() {
         super.resetCursorRects()
         discardCursorRects()
+        cursorRectResetCount += 1
         guard resizeEnabled else { return }
         let edge = PanelMetrics.resizeEdge
         let corner = PanelMetrics.resizeCorner
@@ -1561,6 +1609,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.constrainedExpandedFrame(frame) ?? frame
         }
         panel.enableCursorRects()
+        panel.resetCursorRects()
         spaceMirrorPanel = PlanPanel(contentRect: NSRect(origin: .zero, size: collapsedSize),
                                      styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         spaceMirrorPanel.title = "Task Plan Host Space Mirror"
@@ -1769,6 +1818,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         try? persist()
     }
     func windowDidResize(_ notification: Notification) {
+        // Space transitions can resize the panel while it is still non-key.
+        // Rebuild against the final content geometry, even during a tween.
+        if let hostView, hostView.resizeEnabled { panel.resetCursorRects() }
         guard !applyingPresentationFrame, !applyingHostAttachmentFrame, !store.collapsed,
               !store.transitionIconOnly, !collapsingToIcon else { return }
         guard panel.frame.width >= expandedMinimumSize.width,
@@ -3223,6 +3275,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "closable": panel?.styleMask.contains(.closable) ?? false,
                                      "movableByBackground": panel?.isMovableByWindowBackground ?? false,
                                      "resizeCursorZones": hostView?.resizeCursorZoneCount ?? 0,
+                                     "resizeCursorRectResets": hostView?.cursorRectResetCount ?? 0,
+                                     "resizeCursorTrackingEvents": hostView?.cursorTrackingEventCount ?? 0,
                                      "resizeCursorTracking": "explicit-7pt-edge-12pt-corner-nonactivating",
                                      "resizeCursorActivatesApplication": false,
                                      "resizeCoordinateMapping": "flipped-hosting-view-to-screen-edges",

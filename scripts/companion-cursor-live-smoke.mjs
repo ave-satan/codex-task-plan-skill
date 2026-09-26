@@ -34,7 +34,10 @@ import AppKit
 import CoreGraphics
 import Darwin
 let top = NSScreen.screens.map { $0.frame.maxY }.max()!
-CGWarpMouseCursorPosition(CGPoint(x: ${point.x}, y: top - ${point.y}))
+let position = CGPoint(x: ${point.x}, y: top - ${point.y})
+CGWarpMouseCursorPosition(position)
+CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: position,
+        mouseButton: .left)?.post(tap: .cghidEventTap)
 usleep(350000)
 `);
 }
@@ -69,6 +72,8 @@ usleep(600000)
   }, `bring ${hostBundle} and the companion to the foreground`);
   assert.equal(initial.window.resizeCursorTracking,
     'explicit-7pt-edge-12pt-corner-nonactivating');
+  assert.ok(initial.window.resizeCursorRectResets > 0,
+    'non-key panel explicitly registers cursor rects on startup');
 
   const midY = initial.window.y + initial.window.height / 2;
   await movePointer({ x: initial.window.x + 2, y: midY });
@@ -79,6 +84,8 @@ usleep(600000)
   assert.equal(edge.frontmostBundle, hostBundle,
     'resize cursor hover must not activate the companion or flash Codex traffic lights');
   assert.equal(edge.window.resizeCursorActivatesApplication, false);
+  assert.ok(edge.window.resizeCursorTrackingEvents > initial.window.resizeCursorTrackingEvents,
+    'nonactivating panel receives active-always cursor events at the edge');
 
   await movePointer({ x: initial.window.x + 9, y: midY });
   await eventually(async () => {
@@ -105,6 +112,8 @@ usleep(600000)
       && state.window.width < initial.window.width - 10 && state;
   }, 'left-edge drag resizes the plan');
   assert.equal(horizontal.frontmostBundle, hostBundle);
+  assert.ok(horizontal.window.resizeCursorRectResets > initial.window.resizeCursorRectResets,
+    'resizing the non-key panel rebuilds cursor rects for the new frame');
 
   await sendCompanion(socket, {
     action: 'set_frame',
