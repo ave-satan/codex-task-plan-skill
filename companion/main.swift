@@ -2635,9 +2635,21 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard store.active != nil, store.collapsed, !dismissed else { return }
         guard !spaceArrivalPending else { return }
         spaceArrivalPending = true
+        // The expanded mirror is already on Codex's Space. Remove the compact
+        // panel from the returning Space animation before both can be drawn.
+        panel.alphaValue = 0
+        store.collapsedHovered = false
+        collapsedHoverStartedAt = nil
         lastEarlyPresentationSignal = "host-window-motion-arriving"
         lastEarlyPresentationSignalAt = Date()
         journal("space_arrival_observed")
+    }
+
+    func cancelSpaceArrival() {
+        guard spaceArrivalPending else { return }
+        spaceArrivalPending = false
+        panel.alphaValue = 0.82
+        journal("space_arrival_cancelled")
     }
 
     func hostWindowIsMeaningfullyVisible(_ observation: HostWindowObservation) -> Bool {
@@ -2875,8 +2887,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
            hostWindowIsMeaningfullyVisible(current) {
             noteSpaceArrival()
         } else if front != hostBundle, spaceArrivalPending, current == nil {
-            spaceArrivalPending = false
-            journal("space_arrival_cancelled")
+            cancelSpaceArrival()
         }
     }
 
@@ -2902,7 +2913,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         if awayFromHostSpace {
             panel.level = .floating
-            panel.alphaValue = 0.82
+            panel.alphaValue = spaceArrivalPending ? 0 : 0.82
             panel.orderFrontRegardless()
             return
         }
@@ -2951,7 +2962,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func syncCollapsedHover() {
-        guard awayFromHostSpace, store.collapsed, !applyingPresentationFrame,
+        guard awayFromHostSpace, !spaceArrivalPending, store.collapsed, !applyingPresentationFrame,
               panel.isVisible, store.active != nil else {
             if store.collapsedHovered { store.collapsedHovered = false }
             collapsedHoverStartedAt = nil
@@ -3480,6 +3491,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             case "workspace_transition_probe":
                 if command.name == "arriving" {
                     noteSpaceArrival()
+                } else if command.name == "arrival-cancelled" {
+                    cancelSpaceArrival()
                 } else if command.name == "departure-completed" {
                     finishSpaceDeparture()
                 } else if command.name == "return-completed" {

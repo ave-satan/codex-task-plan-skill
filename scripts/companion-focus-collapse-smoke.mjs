@@ -408,6 +408,20 @@ try {
   assert.equal(remote.window.panelLevel, 3);
   assert.equal(remote.window.spaceMirrorPresentation, 'expanded');
 
+  const arriving = await sendCompanion(socket,
+    { action: 'workspace_transition_probe', name: 'arriving' });
+  assert.equal(arriving.state.window.spaceArrivalPending, true);
+  assert.equal(arriving.state.window.alpha, 0,
+    'compact icon must disappear as soon as the host Space starts returning');
+  const cancelledArrival = await sendCompanion(socket,
+    { action: 'workspace_transition_probe', name: 'arrival-cancelled' });
+  assert.equal(cancelledArrival.state.window.spaceArrivalPending, false);
+  assert.ok(Math.abs(cancelledArrival.state.window.alpha - 0.82) < 0.01,
+    'a cancelled return must show the compact icon again');
+  const returning = await sendCompanion(socket,
+    { action: 'workspace_transition_probe', name: 'arriving' });
+  assert.equal(returning.state.window.alpha, 0);
+
   await signal(hostBundle, 'reset');
   const restoreResponse = await sendCompanion(socket,
     { action: 'workspace_transition_probe', name: 'return-completed' });
