@@ -1826,10 +1826,6 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             captureHostAttachment()
             try? persist()
         }
-        if didDrag, !spaceDepartureActive, !awayFromHostSpace,
-           NSWorkspace.shared.frontmostApplication?.bundleIdentifier == hostBundle {
-            _ = primeRemoteSpaceIcon()
-        }
         return didDrag
     }
 
@@ -2490,6 +2486,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func restoreHostSpacePresentation(event: String? = nil) {
         if updateMissionControlSuspension() { return }
+        hideRemoteSpaceIcon()
         guard let hostSpaceID, let spaceRouter else {
             spaceArrivalPending = false
             spaceDepartureActive = false
@@ -2745,7 +2742,6 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             hostSpaceRestoreObservation = nil
             hostSpaceRestoreStableSamples = 0
             spaceHostExpandedFrame = nil
-            _ = primeRemoteSpaceIcon()
             journal("space_host_geometry_stable")
         }
 
@@ -2910,6 +2906,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             panel.orderFrontRegardless()
             return
         }
+        hideRemoteSpaceIcon()
         if hostWindowMinimized {
             panel.orderOut(nil)
             if lastVisibility != false { lastVisibility = false; journal("visibility") }
@@ -2934,7 +2931,6 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 orderPanelAboveHost()
             }
             if let current = primaryHostWindowObservation() { syncAttachedFrame(to: current) }
-            if !hostSpaceRestorePending { _ = primeRemoteSpaceIcon() }
         }
         let visible = panel.isVisible
         if visible != lastVisibility { lastVisibility = visible; journal("visibility") }

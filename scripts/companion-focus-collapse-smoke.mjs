@@ -355,6 +355,8 @@ try {
     return !state.window.missionControlSuspended && state.visible
       && state.window.presentation === 'expanded' && state;
   }, 'plan reappears only after Mission Control exits');
+  assert.equal((await sendCompanion(socket, { action: 'status' })).state.window.spaceRemoteIconVisible,
+    false, 'Codex Space must not keep a separate remote icon after Mission Control');
 
   await signal(hostBundle, 'minimize');
   await eventually(async () => {
@@ -381,6 +383,8 @@ try {
     width: beforeSpace.window.width,
     height: beforeSpace.window.height,
   };
+  assert.equal(beforeSpace.window.spaceRemoteIconVisible, false,
+    'the separate remote icon stays hidden while the expanded plan is on Codex Space');
   await signal(hostBundle, 'space-move');
   const departing = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
@@ -408,6 +412,8 @@ try {
   const restoreResponse = await sendCompanion(socket,
     { action: 'workspace_transition_probe', name: 'return-completed' });
   assert.equal(restoreResponse.state.window.hostSpaceRestorePending, true);
+  assert.equal(restoreResponse.state.window.spaceRemoteIconVisible, false,
+    'returning to Codex hides the remote icon before showing the expanded plan');
   assertFrameEqual({
     x: restoreResponse.state.window.x,
     y: restoreResponse.state.window.y,
@@ -421,6 +427,8 @@ try {
       && !state.window.hostSpaceRestorePending && state;
   }, 'return to Codex Space restores the attached expanded panel');
   assert.equal(returned.window.focusCollapseEnabled, false);
+  assert.equal(returned.window.spaceRemoteIconVisible, false,
+    'remote icon must remain hidden after the host frame stabilizes');
   assertFrameEqual({
     x: returned.window.x,
     y: returned.window.y,
