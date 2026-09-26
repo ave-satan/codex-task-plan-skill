@@ -1534,7 +1534,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.title = "Task Plan Companion"
         panel.delegate = self; panel.isReleasedWhenClosed = false
         panel.level = .normal; panel.hidesOnDeactivate = false; panel.becomesKeyOnlyIfNeeded = true
-        panel.collectionBehavior = [.fullScreenAuxiliary]
+        panel.collectionBehavior = [.fullScreenAuxiliary, .transient]
         panel.titleVisibility = .hidden; panel.titlebarAppearsTransparent = true
         panel.standardWindowButton(.closeButton)?.isHidden = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
@@ -1561,7 +1561,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         spaceMirrorPanel.level = .normal
         spaceMirrorPanel.hidesOnDeactivate = false
         spaceMirrorPanel.becomesKeyOnlyIfNeeded = true
-        spaceMirrorPanel.collectionBehavior = [.fullScreenAuxiliary]
+        spaceMirrorPanel.collectionBehavior = [.fullScreenAuxiliary, .transient]
         spaceMirrorPanel.isMovableByWindowBackground = false
         spaceMirrorPanel.appearance = NSAppearance(named: .darkAqua)
         spaceMirrorPanel.isOpaque = false
@@ -1583,7 +1583,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         spaceRemoteIconPanel.level = .floating
         spaceRemoteIconPanel.hidesOnDeactivate = false
         spaceRemoteIconPanel.becomesKeyOnlyIfNeeded = true
-        spaceRemoteIconPanel.collectionBehavior = [.fullScreenAuxiliary, .stationary]
+        spaceRemoteIconPanel.collectionBehavior = [.fullScreenAuxiliary, .transient]
         spaceRemoteIconPanel.isMovableByWindowBackground = false
         spaceRemoteIconPanel.appearance = NSAppearance(named: .darkAqua)
         spaceRemoteIconPanel.isOpaque = false
