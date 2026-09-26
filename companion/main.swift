@@ -1451,7 +1451,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var lastHostMinimizeTrigger: String?
     var missionControlSuspended = false
     var missionControlLastOverlayAt: Date?
+    var missionControlHostSpaceID: UInt64?
     let missionControlExitGrace: TimeInterval = 0.65
+    let missionControlRemoteExitGrace: TimeInterval = 1.50
     let missionControlTestMarker = ProcessInfo.processInfo.environment["PLAN_COMPANION_TEST_MISSION_CONTROL_MARKER"]
     var hostAttachment: HostAttachment?
     var applyingHostAttachmentFrame = false
@@ -2367,11 +2369,20 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let now = Date()
         let overlayVisible = missionControlOverlayVisible()
         if overlayVisible { missionControlLastOverlayAt = now }
+        let returningToHostSpace = missionControlHostSpaceID != nil
+            && spaceRouter?.activeSpace() == missionControlHostSpaceID
+        // Mission Control can dismiss its overlay before the horizontal Space
+        // transition reaches Codex. Keep the remote icon hidden until the
+        // destination is settled instead of briefly drawing it on Codex's Space.
+        let exitGrace = returningToHostSpace
+            ? missionControlExitGrace : missionControlRemoteExitGrace
         let withinExitGrace = missionControlSuspended
-            && missionControlLastOverlayAt.map { now.timeIntervalSince($0) < missionControlExitGrace } == true
+            && missionControlLastOverlayAt.map { now.timeIntervalSince($0) < exitGrace } == true
         if overlayVisible || withinExitGrace {
             if !missionControlSuspended {
                 missionControlSuspended = true
+                missionControlHostSpaceID = hostSpaceID ?? primaryHostWindowObservation(onScreenOnly: false)
+                    .flatMap { spaceRouter?.spaces(for: $0.id).first }
                 hostSpaceMotionCandidate = nil
                 hostSpaceMotionSamples = 0
                 if hostMinimizingActive, lastHostMinimizeTrigger == "proportional-shrink" {
@@ -2391,6 +2402,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard missionControlSuspended else { return false }
         missionControlSuspended = false
         missionControlLastOverlayAt = nil
+        missionControlHostSpaceID = nil
         hostWindowObservationInitialized = false
         lastHostWindowObservation = nil
         hostSpaceMotionCandidate = nil
@@ -2530,7 +2542,6 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         applyingPresentationFrame = false
         panel.alphaValue = 1
         orderPanelAboveHost()
-        _ = primeRemoteSpaceIcon(hostSpace: hostSpaceID)
         spaceOriginWasCollapsed = nil
         self.hostSpaceID = nil
         hideSpaceMirror()
@@ -2670,6 +2681,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard panel != nil, store.active != nil, !dismissed else {
             missionControlSuspended = false
             missionControlLastOverlayAt = nil
+            missionControlHostSpaceID = nil
             if let hostSpaceID, let spaceRouter, panel != nil {
                 _ = spaceRouter.assign(windowNumber: panel.windowNumber, to: [hostSpaceID])
             }
@@ -2733,6 +2745,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             hostSpaceRestoreObservation = nil
             hostSpaceRestoreStableSamples = 0
             spaceHostExpandedFrame = nil
+            _ = primeRemoteSpaceIcon()
             journal("space_host_geometry_stable")
         }
 
@@ -2921,7 +2934,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 orderPanelAboveHost()
             }
             if let current = primaryHostWindowObservation() { syncAttachedFrame(to: current) }
-            _ = primeRemoteSpaceIcon()
+            if !hostSpaceRestorePending { _ = primeRemoteSpaceIcon() }
         }
         let visible = panel.isVisible
         if visible != lastVisibility { lastVisibility = visible; journal("visibility") }
@@ -2976,7 +2989,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func syncExpandedHoverExit() {
-        guard awayFromHostSpace, !store.collapsed, !applyingPresentationFrame,
+        guard !missionControlSuspended, panel.isVisible,
+              awayFromHostSpace, !store.collapsed, !applyingPresentationFrame,
               expandedFromIconSource != nil,
               NSWorkspace.shared.frontmostApplication?.bundleIdentifier != hostBundle else {
             expandedHoverExitStartedAt = nil
