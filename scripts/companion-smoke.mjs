@@ -105,6 +105,8 @@ try {
   assert.equal(initialWindow.planEmojiPoolCount,150);
   assert.equal(initialWindow.planOverflowBadge,'+N');
   assert.equal(initialWindow.planSwitcherPlacement,'immediate-slide-from-active-icon');
+  assert.equal(initialWindow.planSwitcherInactiveGap,8);
+  assert.equal(initialWindow.planSwitcherSelectionAnimation,'retract-then-blur-rise-title');
   assert.equal(initialWindow.planSwitcherRevealDelay,0);
   assert.equal(initialWindow.planTooltipStyle,'detached-nonactivating-title-tooltip');
   assert.equal(initialWindow.planTooltipVisualStyle,'codex-dark-floating-card-rounded-8pt');

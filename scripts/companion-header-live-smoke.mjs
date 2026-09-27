@@ -56,7 +56,8 @@ CGWarpMouseCursorPosition(old)
 }
 
 const app = spawn(binary, [], { env: { ...process.env,
-  PLAN_COMPANION_DATA: fixture, PLAN_COMPANION_SOCKET: socket, PLAN_COMPANION_HOST: hostBundle },
+  PLAN_COMPANION_DATA: fixture, PLAN_COMPANION_SOCKET: socket, PLAN_COMPANION_HOST: hostBundle,
+  PLAN_COMPANION_TEST_DISABLE_HOST_ATTACHMENT: '1' },
   stdio: ['ignore', 'pipe', 'pipe'] });
 
 try {
@@ -73,12 +74,20 @@ import AppKit
 import Darwin
 NSRunningApplication.runningApplications(withBundleIdentifier: "${hostBundle}").first?.activate()
 usleep(500000)
-`], { stdio: ['ignore', 'pipe', 'pipe'] });
+  `], { stdio: ['ignore', 'pipe', 'pipe'] });
   assert.equal((await once(activator, 'exit'))[0], 0);
+  await sendCompanion(socket, { action: 'snapshot', name: 'pre-hover' });
+  let lastHeaderState;
   const state = await eventually(async () => {
     const current = (await sendCompanion(socket, { action: 'status' })).state;
+    lastHeaderState = current;
     return current.visible && current.window.planIconFrame
       && current.window.planIconFrame.y < current.window.y + current.window.height - 36 && current;
+  }).catch(error => {
+    console.error('header fixture', JSON.stringify({ visible: lastHeaderState?.visible,
+      frame: lastHeaderState?.window?.planIconFrame, window: [lastHeaderState?.window?.x,
+        lastHeaderState?.window?.y, lastHeaderState?.window?.width, lastHeaderState?.window?.height] }));
+    throw error;
   });
   assert.equal(state.selected, 'plan-3');
   assert.equal(state.planSwitcherExpanded, false);
@@ -87,7 +96,7 @@ usleep(500000)
   // A multiline title lowers the centered icon; hover and click must follow it.
   const iconX = state.window.planIconFrame.x + 12;
   const iconY = state.window.planIconFrame.y + 12;
-  const firstAlternativeX = iconX + 28;
+  const firstAlternativeX = iconX + 28 + 8;
   const staleIconY = state.window.y + state.window.height - 24;
   const mover = spawn('/usr/bin/swift', ['-e', pointerScript(iconX, iconY, firstAlternativeX, state.window.x + 220, staleIconY)],
     { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -114,12 +123,20 @@ usleep(500000)
     return early.planSwitcherExpanded && early.hoveredPlanID === 'plan-3';
   });
   await signals.get('REVEAL_READY').promise;
+  let lastExpandedState;
   await eventually(async () => {
     const current = (await sendCompanion(socket, { action: 'status' })).state;
+    lastExpandedState = current;
     if (!current.planSwitcherExpanded) return false;
     await delay(400);
     await sendCompanion(socket, { action: 'snapshot', name: 'expanded' });
     return true;
+  }).catch(error => {
+    console.error('expanded fixture', JSON.stringify({ hovered: lastExpandedState?.hoveredPlanID,
+      expanded: lastExpandedState?.planSwitcherExpanded,
+      icon: lastExpandedState?.window?.planIconFrame,
+      mouse: [lastExpandedState?.window?.mouseX, lastExpandedState?.window?.mouseY] }));
+    throw error;
   });
   await signals.get('ALT_HOVER').promise;
   await eventually(async () => {
@@ -159,22 +176,42 @@ let alternate = point(${firstAlternativeX}, ${iconY})
 CGWarpMouseCursorPosition(alternate)
 usleep(800000)
 CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: alternate, mouseButton: .left)!.post(tap: .cghidEventTap)
-usleep(70000)
+usleep(30000)
+print("SWITCHING"); fflush(stdout)
+usleep(40000)
 CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: alternate, mouseButton: .left)!.post(tap: .cghidEventTap)
 usleep(500000)
 CGWarpMouseCursorPosition(old)
 `], { stdio: ['ignore', 'pipe', 'pipe'] });
   const clickerExit = once(clicker, 'exit');
+  const switchingSignal = new Promise(resolve => {
+    clicker.stdout.on('data', chunk => {
+      if (chunk.toString().includes('SWITCHING')) resolve();
+    });
+  });
   await eventually(async () => {
     const current = (await sendCompanion(socket, { action: 'status' })).state;
     if (current.hoveredPlanID === 'plan-1' && current.planSwitcherExpanded) return true;
     return false;
   });
+  await switchingSignal;
+  const retracting = (await sendCompanion(socket, { action: 'status' })).state;
+  assert.equal(retracting.switchingPlanID, 'plan-1');
+  assert.equal(retracting.selected, 'plan-3', 'the old title stays while icons retract');
+  assert.equal(retracting.planSwitcherExpanded, false);
+  assert.equal(retracting.planSwitcherTrayExpanded, true, 'the backdrop stays behind retracting icons');
+  await delay(80);
+  await sendCompanion(socket, { action: 'snapshot', name: 'retracting' });
   await eventually(async () => (await sendCompanion(socket, { action: 'status' })).state.selected === 'plan-1');
+  await delay(100);
+  await sendCompanion(socket, { action: 'snapshot', name: 'title-changing' });
   assert.equal((await clickerExit)[0], 0);
   const final = (await sendCompanion(socket, { action: 'status' })).state;
   assert.equal(final.planSwitcherExpanded, false);
+  assert.equal(final.planSwitcherTrayExpanded, false);
+  assert.equal(final.switchingPlanID, null);
   assert.equal(final.selected, 'plan-1');
+  await sendCompanion(socket, { action: 'snapshot', name: 'selected' });
   assert.equal(final.visible, true, 'clicking the companion must not hide it');
   assert.equal(final.frontmostBundle, hostBundle, 'clicking the nonactivating panel must preserve host focus');
   console.log(JSON.stringify({ passed: true, fixture, selected: final.selected }));

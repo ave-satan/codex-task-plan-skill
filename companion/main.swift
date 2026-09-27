@@ -85,6 +85,11 @@ private enum PanelMetrics {
     static let headerBottom: CGFloat = 8
     static let headerDivider: CGFloat = 0.5
     static let planHoverExitGrace: TimeInterval = 0.18
+    static let planSwitcherIconSpacing: CGFloat = 4
+    static let planSwitcherExtraGap: CGFloat = 8
+    static let planSwitcherStride: CGFloat = iconColumn + planSwitcherIconSpacing
+    static let planSwitcherTrayDelay: TimeInterval = 0.14
+    static let planSwitcherRetractDelay: TimeInterval = 0.36
     static let resizeEdge: CGFloat = 7
     static let resizeCorner: CGFloat = 12
 }
@@ -272,7 +277,10 @@ final class Store: ObservableObject {
     @Published var selected: String?
     @Published var eventCount = 0
     @Published var planSwitcherExpanded = false
+    @Published var planSwitcherTrayExpanded = false
     @Published var hoveredPlanID: String?
+    @Published var switchingPlanID: String?
+    @Published var titleAppearing = true
     @Published var collapsed = false
     @Published var transitionIconOnly = false
     @Published var transitionToCollapsed = false
@@ -280,8 +288,9 @@ final class Store: ObservableObject {
     @Published var retentionDeadlines: [String: Date] = [:]
     @Published var retentionDuration: TimeInterval = 30
     var creationWatermarks: [String: Int] = [:]
-    var planIconWindowFrame: NSRect?
+    weak var planIconGeometryView: NSView?
     var changed: (() -> Void)?
+    var selectRequested: ((String) -> Void)?
     var removeRequested: ((String) -> Void)?
     var active: Plan? { plans.first { $0.id == selected } }
     func select(_ id: String) {
@@ -289,6 +298,7 @@ final class Store: ObservableObject {
         selected = id
         hoveredPlanID = nil
         planSwitcherExpanded = false
+        planSwitcherTrayExpanded = false
         changed?()
     }
     func upsert(_ plan: Plan, event: Bool = false, selectOnCreate: Bool = true) throws {
@@ -1009,37 +1019,17 @@ struct SpaceMirrorRootView: View {
     }
 }
 
-private final class PlanIconGeometryView: NSView {
-    var onFrame: ((NSRect) -> Void)?
-
-    override func layout() {
-        super.layout()
-        reportFrame()
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        reportFrame()
-    }
-
-    func reportFrame() {
-        guard window != nil, bounds.width > 0, bounds.height > 0 else { return }
-        onFrame?(convert(bounds, to: nil))
-    }
-}
-
 private struct PlanIconGeometryProbe: NSViewRepresentable {
-    var onFrame: (NSRect) -> Void
+    var store: Store
 
-    func makeNSView(context: Context) -> PlanIconGeometryView {
-        let view = PlanIconGeometryView()
-        view.onFrame = onFrame
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        store.planIconGeometryView = view
         return view
     }
 
-    func updateNSView(_ view: PlanIconGeometryView, context: Context) {
-        view.onFrame = onFrame
-        view.reportFrame()
+    func updateNSView(_ view: NSView, context: Context) {
+        store.planIconGeometryView = view
     }
 }
 
@@ -1059,20 +1049,21 @@ struct PlanIconSwitcher: View {
                         .fill(CodexPalette.raised.opacity(0.96))
                         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .stroke(CodexPalette.border, lineWidth: 0.7))
-                        .frame(width: PanelMetrics.iconColumn + 12 + (store.planSwitcherExpanded ? CGFloat(otherPlans.count) * 28 : 0),
+                        .frame(width: PanelMetrics.iconColumn + 12 + (store.planSwitcherTrayExpanded
+                               ? PanelMetrics.planSwitcherExtraGap + CGFloat(otherPlans.count) * PanelMetrics.planSwitcherStride : 0),
                                height: 34)
                         .offset(x: -6)
                         .transition(.scale(scale: 0.72, anchor: .leading).combined(with: .opacity))
-                        .animation(.spring(response: 0.26, dampingFraction: 0.86), value: store.planSwitcherExpanded)
+                        .animation(.spring(response: 0.24, dampingFraction: 0.86), value: store.planSwitcherTrayExpanded)
                         .zIndex(0)
                 }
-                HStack(spacing: 4) {
+                HStack(spacing: PanelMetrics.planSwitcherIconSpacing) {
                     PlanEmojiCircle(store: store, plan: active, size: PanelMetrics.iconColumn,
                                     highlighted: store.hoveredPlanID == active.id,
                                     showsHoverBackground: false)
-                        .background(PlanIconGeometryProbe { store.planIconWindowFrame = $0 })
+                        .background(PlanIconGeometryProbe(store: store))
                         .overlay(alignment: .bottomTrailing) {
-                            if !store.planSwitcherExpanded, !otherPlans.isEmpty {
+                            if !store.planSwitcherExpanded, store.switchingPlanID == nil, !otherPlans.isEmpty {
                                 Text("+\(otherPlans.count)")
                                     .font(.system(size: 7, weight: .bold))
                                     .monospacedDigit()
@@ -1087,15 +1078,15 @@ struct PlanIconSwitcher: View {
                     if store.planSwitcherExpanded {
                         ForEach(Array(otherPlans.enumerated()), id: \.element.id) { index, plan in
                             Button {
-                                store.select(plan.id)
-                                withAnimation(.easeOut(duration: 0.14)) { store.planSwitcherExpanded = false }
+                                store.selectRequested?(plan.id)
                             } label: {
                                 PlanEmojiCircle(store: store, plan: plan, size: PanelMetrics.iconColumn,
                                                 highlighted: store.hoveredPlanID == plan.id,
                                                 showsHoverBackground: false)
                             }
                             .buttonStyle(.plain)
-                            .transition(.offset(x: -16).combined(with: .opacity))
+                            .padding(.leading, index == 0 ? PanelMetrics.planSwitcherExtraGap : 0)
+                            .transition(.offset(x: -24).combined(with: .opacity))
                             .zIndex(Double(otherPlans.count - index))
                         }
                     }
@@ -1121,6 +1112,9 @@ struct PanelView: View {
                         Text(plan.title)
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(CodexPalette.primary)
+                            .opacity(store.titleAppearing ? 1 : 0)
+                            .blur(radius: store.titleAppearing ? 0 : 4)
+                            .offset(y: store.titleAppearing ? 0 : 6)
                             .fixedSize(horizontal: false, vertical: true)
                             .layoutPriority(1)
                         Spacer(minLength: 6)
@@ -1567,6 +1561,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let missionControlTestMarker = ProcessInfo.processInfo.environment["PLAN_COMPANION_TEST_MISSION_CONTROL_MARKER"]
     var hostAttachment: HostAttachment?
     var applyingHostAttachmentFrame = false
+    let disableHostAttachmentForTests = ProcessInfo.processInfo.environment["PLAN_COMPANION_TEST_DISABLE_HOST_ATTACHMENT"] == "1"
     let retentionSeconds = max(0.1, Double(ProcessInfo.processInfo.environment["PLAN_COMPANION_RETENTION_SECONDS"] ?? "") ?? 30)
     let collapsedSize = NSSize(width: 52, height: 52)
     let expandedMinimumSize = NSSize(width: PanelMetrics.minimumWidth, height: PanelMetrics.minimumHeight)
@@ -1738,7 +1733,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     }
                     return nil
                 }
-                self.store.select(selected)
+                self.beginPlanSwitch(to: selected)
                 return nil
             }
             if self.activePlanIconContains(pointer), let selected = self.store.selected,
@@ -1776,6 +1771,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return event
         }
         store.changed = { [weak self] in self?.stateChanged() }
+        store.selectRequested = { [weak self] id in self?.beginPlanSwitch(to: id) }
         store.removeRequested = { [weak self] id in
             _ = self?.removeCompletedPlanIfReady(id)
         }
@@ -1897,7 +1893,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func planIconFrame(in frame: NSRect) -> NSRect {
-        if let icon = store.planIconWindowFrame, icon.width > 0, icon.height > 0 {
+        if let view = store.planIconGeometryView, view.window != nil,
+           view.bounds.width > 0, view.bounds.height > 0 {
+            let icon = view.convert(view.bounds, to: nil)
             return NSRect(x: frame.minX + icon.minX,
                           y: frame.minY + icon.minY,
                           width: icon.width, height: icon.height)
@@ -1915,7 +1913,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func planIconStripZone(in frame: NSRect, otherCount: Int) -> NSRect {
         var zone = planIconActiveZone(in: frame)
-        zone.size.width += CGFloat(otherCount) * (PanelMetrics.iconColumn + 4)
+        if otherCount > 0 {
+            zone.size.width += PanelMetrics.planSwitcherExtraGap
+                + CGFloat(otherCount) * PanelMetrics.planSwitcherStride
+        }
         return zone
     }
 
@@ -1927,7 +1928,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // The plan icon strip remains interactive; every other non-resize part of
         // this read-only panel is a dependable drag surface, including title text.
-        let otherCount = store.planSwitcherExpanded ? max(0, store.plans.count - 1) : 0
+        let otherCount = store.planSwitcherExpanded || store.switchingPlanID != nil
+            ? max(0, store.plans.count - 1) : 0
         let iconStrip = planIconStripZone(in: panel.frame, otherCount: otherCount)
         return !iconStrip.contains(point)
     }
@@ -1970,12 +1972,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func planSwitcherSelection(at point: NSPoint) -> String? {
-        guard !store.collapsed, store.planSwitcherExpanded else { return nil }
+        guard !store.collapsed, store.planSwitcherExpanded, store.switchingPlanID == nil else { return nil }
         let otherPlans = store.plans.filter { $0.id != store.selected }
         guard !otherPlans.isEmpty else { return nil }
-        let stride = PanelMetrics.iconColumn + 4
+        let stride = PanelMetrics.planSwitcherStride
         let icon = planIconFrame(in: panel.frame)
-        let firstX = icon.minX + stride
+        let firstX = icon.minX + stride + PanelMetrics.planSwitcherExtraGap
         let zoneY = icon.minY - 6
         guard point.y >= zoneY, point.y <= zoneY + PanelMetrics.iconColumn + 12,
               point.x >= firstX else { return nil }
@@ -1984,6 +1986,45 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let itemX = firstX + CGFloat(index) * stride
         guard point.x <= itemX + PanelMetrics.iconColumn else { return nil }
         return otherPlans[index].id
+    }
+
+    func beginPlanSwitch(to id: String) {
+        guard store.switchingPlanID == nil, store.selected != id,
+              store.plans.contains(where: { $0.id == id }) else { return }
+        if completedPlanIsReady(id) {
+            _ = removeCompletedPlanIfReady(id)
+            return
+        }
+        let sourceID = store.selected
+        store.switchingPlanID = id
+        planTooltip.hide(animated: true)
+        planHoverExitStartedAt = nil
+        store.hoveredPlanID = store.selected
+        withAnimation(.spring(response: PanelMetrics.planSwitcherRetractDelay,
+                              dampingFraction: 0.86)) {
+            store.planSwitcherExpanded = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + PanelMetrics.planSwitcherTrayDelay) { [weak self] in
+            guard let self, self.store.switchingPlanID == id else { return }
+            withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                self.store.planSwitcherTrayExpanded = false
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + PanelMetrics.planSwitcherRetractDelay) { [weak self] in
+            guard let self, self.store.switchingPlanID == id else { return }
+            self.store.switchingPlanID = nil
+            guard self.store.selected == sourceID,
+                  self.store.plans.contains(where: { $0.id == id }) else {
+                self.store.hoveredPlanID = nil
+                return
+            }
+            self.store.titleAppearing = false
+            self.store.select(id)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+                guard let self else { return }
+                withAnimation(.easeOut(duration: 0.24)) { self.store.titleAppearing = true }
+            }
+        }
     }
 
     func activePlanIconContains(_ point: NSPoint) -> Bool {
@@ -2073,14 +2114,14 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func captureHostAttachment() {
-        guard !store.collapsed, !spaceDepartureActive, !awayFromHostSpace,
+        guard !disableHostAttachmentForTests, !store.collapsed, !spaceDepartureActive, !awayFromHostSpace,
               let hostFrame = currentHostFrame(),
               let attachment = attachment(for: panel.frame, in: hostFrame) else { return }
         hostAttachment = attachment
     }
 
     func syncAttachedFrame(to observation: HostWindowObservation) {
-        guard !store.collapsed, !spaceDepartureActive, !awayFromHostSpace else { return }
+        guard !disableHostAttachmentForTests, !store.collapsed, !spaceDepartureActive, !awayFromHostSpace else { return }
         let hostFrame = appKitFrame(for: observation)
         guard let attachment = hostAttachment else {
             let fitted = clamped(panel.frame, to: hostFrame)
@@ -2255,6 +2296,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         expandedMovedBeyondSource = false
         expandedHoverExitStartedAt = nil
         store.planSwitcherExpanded = false
+        store.planSwitcherTrayExpanded = false
         store.hoveredPlanID = nil
         planTooltip.hide(animated: true)
         collapsingToIcon = true
@@ -2290,6 +2332,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         expandedMovedBeyondSource = false
         expandedHoverExitStartedAt = nil
         store.planSwitcherExpanded = false
+        store.planSwitcherTrayExpanded = false
         store.hoveredPlanID = nil
         store.collapsedHovered = false
         store.transitionToCollapsed = false
@@ -3204,6 +3247,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             planHoverExitStartedAt = nil
             if store.hoveredPlanID != nil { store.hoveredPlanID = nil }
             if store.planSwitcherExpanded { store.planSwitcherExpanded = false }
+            if store.planSwitcherTrayExpanded { store.planSwitcherTrayExpanded = false }
             return
         }
         let frame = panel.frame
@@ -3212,8 +3256,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let originX = icon.minX
         let activeZone = planIconActiveZone(in: frame)
         let others = store.plans.filter { $0.id != active.id }
-        let stride = PanelMetrics.iconColumn + 4
+        let stride = PanelMetrics.planSwitcherStride
         let stripZone = planIconStripZone(in: frame, otherCount: others.count)
+
+        if store.switchingPlanID != nil { return }
 
         if activeZone.contains(point) {
             planTooltip.hide()
@@ -3222,6 +3268,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if !others.isEmpty, !store.planSwitcherExpanded {
                 withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
                     store.planSwitcherExpanded = true
+                    store.planSwitcherTrayExpanded = true
                 }
             }
             return
@@ -3229,12 +3276,13 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         if store.planSwitcherExpanded, stripZone.contains(point) {
             planHoverExitStartedAt = nil
-            let relativeX = point.x - (originX + stride)
+            let firstX = originX + stride + PanelMetrics.planSwitcherExtraGap
+            let relativeX = point.x - firstX
             let index = Int(floor(relativeX / stride))
             let hovered = (0..<others.count).contains(index) ? others[index].id : nil
             if store.hoveredPlanID != hovered { store.hoveredPlanID = hovered }
             if (0..<others.count).contains(index) {
-                let iconFrame = NSRect(x: originX + CGFloat(index + 1) * stride,
+                let iconFrame = NSRect(x: firstX + CGFloat(index) * stride,
                                        y: icon.minY,
                                        width: PanelMetrics.iconColumn, height: PanelMetrics.iconColumn)
                 planTooltip.show(others[index].title, below: iconFrame)
@@ -3255,6 +3303,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if store.planSwitcherExpanded {
                 withAnimation(.spring(response: 0.22, dampingFraction: 0.9)) {
                     store.planSwitcherExpanded = false
+                    store.planSwitcherTrayExpanded = false
                 }
             }
             return
@@ -3266,9 +3315,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 store.hoveredPlanID = nil
             }
         }
-        if store.planSwitcherExpanded {
+        if store.planSwitcherExpanded || store.planSwitcherTrayExpanded {
             withAnimation(.spring(response: 0.22, dampingFraction: 0.9)) {
                 store.planSwitcherExpanded = false
+                store.planSwitcherTrayExpanded = false
             }
         }
     }
@@ -3408,6 +3458,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "planEmojiPoolCount": planEmojiPool.count,
                                      "planOverflowBadge": "+N",
                                      "planSwitcherPlacement": "immediate-slide-from-active-icon",
+                                     "planSwitcherInactiveGap": PanelMetrics.planSwitcherExtraGap,
+                                     "planSwitcherSelectionAnimation": "retract-then-blur-rise-title",
                                      "planSwitcherRevealDelay": 0.0,
                                      "planTooltipStyle": "detached-nonactivating-title-tooltip",
                                      "planTooltipVisualStyle": "codex-dark-floating-card-rounded-8pt",
@@ -3554,6 +3606,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return ["pid": Int(getpid()), "selected": store.selected ?? NSNull(), "planCount": store.plans.count,
                 "selectorVisible": false, "planSwitcherAvailable": store.plans.count > 1,
                 "planSwitcherExpanded": store.planSwitcherExpanded,
+                "planSwitcherTrayExpanded": store.planSwitcherTrayExpanded,
+                "switchingPlanID": store.switchingPlanID ?? NSNull(),
                 "hoveredPlanID": store.hoveredPlanID ?? NSNull(),
                 "visible": panel?.isVisible ?? false,
                 "frontmostBundle": NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown",
