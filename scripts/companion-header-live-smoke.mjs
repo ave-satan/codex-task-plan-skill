@@ -21,7 +21,7 @@ async function eventually(predicate) {
   throw new Error('Timed out waiting for live header state');
 }
 
-function pointerScript(appKitX, appKitY, clickAppKitX = null, awayAppKitX = null) {
+function pointerScript(appKitX, appKitY, clickAppKitX = null, awayAppKitX = null, staleAppKitY = null) {
   return `
 import AppKit
 import CoreGraphics
@@ -29,6 +29,11 @@ import Darwin
 let old = CGEvent(source: nil)!.location
 let screenTop = NSScreen.screens.first!.frame.maxY
 func cgPoint(_ x: Double, _ y: Double) -> CGPoint { CGPoint(x: x, y: screenTop - y) }
+${staleAppKitY === null ? '' : `
+CGWarpMouseCursorPosition(cgPoint(${appKitX}, ${staleAppKitY}))
+print("STALE_HOVER"); fflush(stdout)
+usleep(800000)
+`}
 CGWarpMouseCursorPosition(cgPoint(${appKitX}, ${appKitY}))
 print("ACTIVE_HOVER"); fflush(stdout)
 usleep(120000)
@@ -56,13 +61,13 @@ const app = spawn(binary, [], { env: { ...process.env,
 
 try {
   await eventually(async () => (await sendCompanion(socket, { action: 'status' })).ok);
-  for (const [index, title] of ['Проверка палитры Codex и поведения длинной подсказки', 'Второй эксперимент', 'Новая шапка планов'].entries()) {
+  for (const [index, title] of ['Проверка палитры Codex и поведения длинной подсказки', 'Второй эксперимент', 'Новая шапка планов с очень длинным названием для проверки положения иконки'].entries()) {
     await sendCompanion(socket, { action: 'upsert', plan: {
       id: `plan-${index + 1}`, title, revision: 1, status: 'active',
       steps: [{ id: 'one', title: 'Шаг', status: index === 2 ? 'in_progress' : 'pending', progress: 38 }]
     }});
   }
-  await sendCompanion(socket, { action: 'set_frame', x: 500, y: 300, width: 420, height: 430 });
+  await sendCompanion(socket, { action: 'set_frame', x: 500, y: 300, width: 320, height: 430 });
   const activator = spawn('/usr/bin/swift', ['-e', `
 import AppKit
 import Darwin
@@ -72,22 +77,24 @@ usleep(500000)
   assert.equal((await once(activator, 'exit'))[0], 0);
   const state = await eventually(async () => {
     const current = (await sendCompanion(socket, { action: 'status' })).state;
-    return current.visible && current;
+    return current.visible && current.window.planIconFrame
+      && current.window.planIconFrame.y < current.window.y + current.window.height - 36 && current;
   });
   assert.equal(state.selected, 'plan-3');
   assert.equal(state.planSwitcherExpanded, false);
   await sendCompanion(socket, { action: 'snapshot', name: 'collapsed' });
 
-  // Header, status icons and text share the same 12/24/8 point grid.
-  const iconX = state.window.x + 24;
-  const iconY = state.window.y + state.window.height - 24;
-  const firstAlternativeX = state.window.x + 52;
-  const mover = spawn('/usr/bin/swift', ['-e', pointerScript(iconX, iconY, firstAlternativeX, state.window.x + 220)],
+  // A multiline title lowers the centered icon; hover and click must follow it.
+  const iconX = state.window.planIconFrame.x + 12;
+  const iconY = state.window.planIconFrame.y + 12;
+  const firstAlternativeX = iconX + 28;
+  const staleIconY = state.window.y + state.window.height - 24;
+  const mover = spawn('/usr/bin/swift', ['-e', pointerScript(iconX, iconY, firstAlternativeX, state.window.x + 220, staleIconY)],
     { stdio: ['ignore', 'pipe', 'pipe'] });
   const moverExit = once(mover, 'exit');
   let moverOutput = '';
   const signals = new Map();
-  for (const name of ['ACTIVE_HOVER', 'EARLY', 'REVEAL_READY', 'ALT_HOVER', 'LEAVE', 'EXIT_EARLY', 'EXIT_DONE']) {
+  for (const name of ['STALE_HOVER', 'ACTIVE_HOVER', 'EARLY', 'REVEAL_READY', 'ALT_HOVER', 'LEAVE', 'EXIT_EARLY', 'EXIT_DONE']) {
     signals.set(name, {});
     signals.get(name).promise = new Promise(resolve => { signals.get(name).resolve = resolve; });
   }
@@ -96,6 +103,11 @@ usleep(500000)
     for (const [name, signal] of signals) if (moverOutput.includes(name)) signal.resolve();
   });
 
+  await signals.get('STALE_HOVER').promise;
+  await delay(120);
+  const stale = (await sendCompanion(socket, { action: 'status' })).state;
+  assert.equal(stale.hoveredPlanID, null, 'old top-row hit zone must not activate hover');
+  assert.equal(stale.planSwitcherExpanded, false);
   await signals.get('EARLY').promise;
   await eventually(async () => {
     const early = (await sendCompanion(socket, { action: 'status' })).state;

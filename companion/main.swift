@@ -280,6 +280,7 @@ final class Store: ObservableObject {
     @Published var retentionDeadlines: [String: Date] = [:]
     @Published var retentionDuration: TimeInterval = 30
     var creationWatermarks: [String: Int] = [:]
+    var planIconWindowFrame: NSRect?
     var changed: (() -> Void)?
     var removeRequested: ((String) -> Void)?
     var active: Plan? { plans.first { $0.id == selected } }
@@ -768,11 +769,12 @@ struct PlanEmojiCircle: View {
     var plan: Plan
     var size: CGFloat = 30
     var highlighted = false
+    var showsHoverBackground = true
     var glyphSize: CGFloat = PanelMetrics.planIconGlyph
 
     var body: some View {
         ZStack {
-            Circle().fill(highlighted && plan.status != "completed" ? Color.white.opacity(0.055) : .clear)
+            Circle().fill(showsHoverBackground && highlighted && plan.status != "completed" ? Color.white.opacity(0.055) : .clear)
             Text(planEmoji(plan))
                 .font(.system(size: min(glyphSize, size * 0.75)))
                 .multilineTextAlignment(.center)
@@ -1007,6 +1009,40 @@ struct SpaceMirrorRootView: View {
     }
 }
 
+private final class PlanIconGeometryView: NSView {
+    var onFrame: ((NSRect) -> Void)?
+
+    override func layout() {
+        super.layout()
+        reportFrame()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        reportFrame()
+    }
+
+    func reportFrame() {
+        guard window != nil, bounds.width > 0, bounds.height > 0 else { return }
+        onFrame?(convert(bounds, to: nil))
+    }
+}
+
+private struct PlanIconGeometryProbe: NSViewRepresentable {
+    var onFrame: (NSRect) -> Void
+
+    func makeNSView(context: Context) -> PlanIconGeometryView {
+        let view = PlanIconGeometryView()
+        view.onFrame = onFrame
+        return view
+    }
+
+    func updateNSView(_ view: PlanIconGeometryView, context: Context) {
+        view.onFrame = onFrame
+        view.reportFrame()
+    }
+}
+
 struct PlanIconSwitcher: View {
     @ObservedObject var store: Store
 
@@ -1019,9 +1055,9 @@ struct PlanIconSwitcher: View {
             Color.clear.frame(width: PanelMetrics.iconColumn, height: PanelMetrics.iconColumn)
             if let active = store.active {
                 if store.hoveredPlanID != nil {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(CodexPalette.raised.opacity(0.96))
-                        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .stroke(CodexPalette.border, lineWidth: 0.7))
                         .frame(width: PanelMetrics.iconColumn + 12 + (store.planSwitcherExpanded ? CGFloat(otherPlans.count) * 28 : 0),
                                height: 34)
@@ -1032,7 +1068,9 @@ struct PlanIconSwitcher: View {
                 }
                 HStack(spacing: 4) {
                     PlanEmojiCircle(store: store, plan: active, size: PanelMetrics.iconColumn,
-                                    highlighted: store.hoveredPlanID == active.id)
+                                    highlighted: store.hoveredPlanID == active.id,
+                                    showsHoverBackground: false)
+                        .background(PlanIconGeometryProbe { store.planIconWindowFrame = $0 })
                         .overlay(alignment: .bottomTrailing) {
                             if !store.planSwitcherExpanded, !otherPlans.isEmpty {
                                 Text("+\(otherPlans.count)")
@@ -1053,7 +1091,8 @@ struct PlanIconSwitcher: View {
                                 withAnimation(.easeOut(duration: 0.14)) { store.planSwitcherExpanded = false }
                             } label: {
                                 PlanEmojiCircle(store: store, plan: plan, size: PanelMetrics.iconColumn,
-                                                highlighted: store.hoveredPlanID == plan.id)
+                                                highlighted: store.hoveredPlanID == plan.id,
+                                                showsHoverBackground: false)
                             }
                             .buttonStyle(.plain)
                             .transition(.offset(x: -16).combined(with: .opacity))
@@ -1858,9 +1897,26 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func planIconFrame(in frame: NSRect) -> NSRect {
-        NSRect(x: frame.minX + PanelMetrics.inset,
-               y: frame.maxY - PanelMetrics.inset - PanelMetrics.iconColumn,
-               width: PanelMetrics.iconColumn, height: PanelMetrics.iconColumn)
+        if let icon = store.planIconWindowFrame, icon.width > 0, icon.height > 0 {
+            return NSRect(x: frame.minX + icon.minX,
+                          y: frame.minY + icon.minY,
+                          width: icon.width, height: icon.height)
+        }
+        return NSRect(x: frame.minX + PanelMetrics.inset,
+                      y: frame.maxY - PanelMetrics.inset - PanelMetrics.iconColumn,
+                      width: PanelMetrics.iconColumn, height: PanelMetrics.iconColumn)
+    }
+
+    func planIconActiveZone(in frame: NSRect) -> NSRect {
+        let icon = planIconFrame(in: frame)
+        return NSRect(x: icon.minX - 4, y: icon.minY - 6,
+                      width: icon.width + 8, height: icon.height + 12)
+    }
+
+    func planIconStripZone(in frame: NSRect, otherCount: Int) -> NSRect {
+        var zone = planIconActiveZone(in: frame)
+        zone.size.width += CGFloat(otherCount) * (PanelMetrics.iconColumn + 4)
+        return zone
     }
 
     func canBeginWindowDrag(at point: NSPoint) -> Bool {
@@ -1871,13 +1927,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // The plan icon strip remains interactive; every other non-resize part of
         // this read-only panel is a dependable drag surface, including title text.
-        let iconOriginX = panel.frame.minX + PanelMetrics.inset
-        let iconOriginY = panel.frame.maxY - PanelMetrics.inset - PanelMetrics.iconColumn - 6
-        let planCount = max(1, store.plans.count)
-        let stripWidth = PanelMetrics.iconColumn + 8
-            + (store.planSwitcherExpanded ? CGFloat(planCount - 1) * (PanelMetrics.iconColumn + 4) : 0)
-        let iconStrip = NSRect(x: iconOriginX - 4, y: iconOriginY,
-                               width: stripWidth, height: PanelMetrics.iconColumn + 12)
+        let otherCount = store.planSwitcherExpanded ? max(0, store.plans.count - 1) : 0
+        let iconStrip = planIconStripZone(in: panel.frame, otherCount: otherCount)
         return !iconStrip.contains(point)
     }
 
@@ -1923,8 +1974,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let otherPlans = store.plans.filter { $0.id != store.selected }
         guard !otherPlans.isEmpty else { return nil }
         let stride = PanelMetrics.iconColumn + 4
-        let firstX = panel.frame.minX + PanelMetrics.inset + stride
-        let zoneY = panel.frame.maxY - PanelMetrics.inset - PanelMetrics.iconColumn - 6
+        let icon = planIconFrame(in: panel.frame)
+        let firstX = icon.minX + stride
+        let zoneY = icon.minY - 6
         guard point.y >= zoneY, point.y <= zoneY + PanelMetrics.iconColumn + 12,
               point.x >= firstX else { return nil }
         let index = Int((point.x - firstX) / stride)
@@ -1936,11 +1988,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func activePlanIconContains(_ point: NSPoint) -> Bool {
         guard !store.collapsed, panel.frame.contains(point) else { return false }
-        let originX = panel.frame.minX + PanelMetrics.inset
-        let zoneY = panel.frame.maxY - PanelMetrics.inset - PanelMetrics.iconColumn - 6
-        return NSRect(x: originX - 4, y: zoneY,
-                      width: PanelMetrics.iconColumn + 8,
-                      height: PanelMetrics.iconColumn + 12).contains(point)
+        return planIconActiveZone(in: panel.frame).contains(point)
     }
 
     @discardableResult func removeCompletedPlanIfReady(_ id: String) -> Bool {
@@ -3160,15 +3208,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let frame = panel.frame
         let point = NSEvent.mouseLocation
-        let originX = frame.minX + PanelMetrics.inset
-        let zoneY = frame.maxY - PanelMetrics.inset - PanelMetrics.iconColumn - 6
-        let activeZone = NSRect(x: originX - 4, y: zoneY, width: PanelMetrics.iconColumn + 8,
-                                height: PanelMetrics.iconColumn + 12)
+        let icon = planIconFrame(in: frame)
+        let originX = icon.minX
+        let activeZone = planIconActiveZone(in: frame)
         let others = store.plans.filter { $0.id != active.id }
         let stride = PanelMetrics.iconColumn + 4
-        let stripZone = NSRect(x: originX - 4, y: zoneY,
-                               width: PanelMetrics.iconColumn + 8 + CGFloat(others.count) * stride,
-                               height: PanelMetrics.iconColumn + 12)
+        let stripZone = planIconStripZone(in: frame, otherCount: others.count)
 
         if activeZone.contains(point) {
             planTooltip.hide()
@@ -3190,7 +3235,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if store.hoveredPlanID != hovered { store.hoveredPlanID = hovered }
             if (0..<others.count).contains(index) {
                 let iconFrame = NSRect(x: originX + CGFloat(index + 1) * stride,
-                                       y: frame.maxY - PanelMetrics.inset - PanelMetrics.iconColumn,
+                                       y: icon.minY,
                                        width: PanelMetrics.iconColumn, height: PanelMetrics.iconColumn)
                 planTooltip.show(others[index].title, below: iconFrame)
             } else {
@@ -3356,7 +3401,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "stepTextRGB": "#B8B8BA",
                                      "planSelectorStyle": "hover-icon-strip",
                                      "planSelectorControlVisible": false,
-                                     "planIconStyle": "emoji-hover-background",
+                                     "planIconStyle": "emoji-shared-hover-tray",
                                      "planIconGlyphSize": PanelMetrics.planIconGlyph,
                                      "transitionPlanIconGlyphSize": PanelMetrics.planIconGlyph,
                                      "transitionPlanIconAnchor": "fixed-screen-center",
@@ -3471,6 +3516,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "panelClickFocusesHost": true,
                                      "windowDragPreservesCurrentFocus": true,
                                      "hoverExpandedFrameContainsSourceIcon": true,
+                                     "planIconFrame": panel.map {
+                                        let icon = planIconFrame(in: $0.frame)
+                                        return ["x": icon.minX, "y": icon.minY,
+                                                "width": icon.width, "height": icon.height]
+                                     } ?? NSNull(),
                                      "stepsSurfaceRGB": "#1F1F21",
                                      "collapsedPositionPersistence": "state.json:collapsedWindowFrame",
                                      "expandedPositionPersistence": "state.json:expandedWindowFrame",

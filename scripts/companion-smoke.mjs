@@ -100,7 +100,7 @@ try {
   assert.equal(initialWindow.stepTextRGB,'#B8B8BA');
   assert.equal(initialWindow.planSelectorStyle,'hover-icon-strip');
   assert.equal(initialWindow.planSelectorControlVisible,false);
-  assert.equal(initialWindow.planIconStyle,'emoji-hover-background');
+  assert.equal(initialWindow.planIconStyle,'emoji-shared-hover-tray');
   assert.equal(initialWindow.planIconGlyphSize,18);
   assert.equal(initialWindow.planEmojiPoolCount,150);
   assert.equal(initialWindow.planOverflowBadge,'+N');
