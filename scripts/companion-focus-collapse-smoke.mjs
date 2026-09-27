@@ -206,7 +206,8 @@ try {
     command: process.execPath,
     args: [join(root, 'server.mjs')],
     cwd: root,
-    env: { ...process.env, TASK_PLAN_DB: ':memory:', TASK_PLAN_COMPANION_SOCKET: socket },
+    env: { ...process.env, TASK_PLAN_DB: ':memory:', TASK_PLAN_COMPANION_SOCKET: socket,
+      TASK_PLAN_COMPANION_AUTOSTART: '0' },
   });
   client = new Client({ name: 'host-attachment-smoke', version: '0.1.0' }, { capabilities: {} });
   await client.connect(transport);
@@ -245,10 +246,10 @@ try {
   await movePointer({ x: unfocused.window.x + 1, y: unfocused.window.y + unfocused.window.height / 2 });
   const cursor = await eventually(async () => {
     const state = (await sendCompanion(socket, { action: 'status' })).state;
-    return state.window.liveResizeCursorKind === 'left' && state;
-  }, 'nonactivating resize cursor');
+    return state.window.liveResizeCursorKind === null && state;
+  }, 'covered plan must not override the foreground app cursor');
   assert.equal(cursor.frontmostBundle, awayBundle,
-    'hovering a resize edge must not activate the companion or flash Codex traffic lights');
+    'hovering a covered resize edge must not activate the companion or flash Codex traffic lights');
   assert.equal(cursor.window.resizeCursorActivatesApplication, false);
   assert.equal(cursor.window.resizeCursorTracking, 'explicit-7pt-edge-12pt-corner-nonactivating');
 

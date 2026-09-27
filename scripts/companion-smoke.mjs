@@ -6,7 +6,7 @@ import { once } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { sendCompanion } from '../companion-bridge.mjs';
+import { companionPlan, sendCompanion } from '../companion-bridge.mjs';
 
 const fixture = await mkdtemp('/tmp/taskplan-bridge-');
 const socket = join(fixture, 'control.sock');
@@ -31,7 +31,8 @@ async function stop() { const exited = once(app, 'exit'); await sendCompanion(so
 async function connect() {
   const client = new Client({name:'companion-integration',version:'1'});
   await client.connect(new StdioClientTransport({command:process.execPath,args:[join(root,'server.mjs')],cwd:root,
-    env:{...process.env,CODEX_HOME:fixture,TASK_PLAN_DB:dbPath,TASK_PLAN_COMPANION_SOCKET:socket}}));
+    env:{...process.env,CODEX_HOME:fixture,CODEX_SQLITE_HOME:fixture,TASK_PLAN_DB:dbPath,
+      TASK_PLAN_COMPANION_SOCKET:socket,TASK_PLAN_COMPANION_AUTOSTART:'0'}}));
   clients.push(client); return client;
 }
 async function call(client, name, args) {
@@ -206,6 +207,9 @@ try {
   for (const step_id of ['step-1','step-2']) update=await call(a,'update_task_plan_step',{plan_id:aid,step_id,status:'completed',agents:[{name:'worker',category:'testing',status:'completed'}]});
   state=await delivered(aid,update.revision); assert.equal(state.selected,aid);
   assert.equal(state.plans.find(p=>p.id===aid).status,'completed');
+  const completedSource = (await call(a,'get_task_plan',{plan_id:aid})).plan;
+  assert.equal(state.plans.find(p=>p.id===aid).completedAt,completedSource.completedAt,
+    'companion must retain the original completion timestamp');
   checks.push('newly completed plan becomes selected immediately');
   await sendCompanion(socket,{action:'select',id:aid});
   const priorEvents=(await sendCompanion(socket,{action:'status'})).state.eventCount;
@@ -255,6 +259,21 @@ try {
   await call(c,'cancel_task_plan',{plan_id:bid});
   await eventually(async()=> (await saved()).plans.find(p=>p.id===bid).status==='cancelled');
   assert.equal((await saved()).selected,'newer'); checks.push('cancellation delivered without reselection');
+  const large = await call(c,'create_task_plan',{title:'Large valid payload',
+    steps:Array.from({length:12},()=> '\0'.repeat(180))});
+  let largeUpdate;
+  for (let i=1; i<=12; i++) {
+    largeUpdate = await call(c,'update_task_plan_step',{plan_id:large.plan_id,
+      step_id:`step-${i}`,status:'in_progress',note:'\0'.repeat(240),
+      agents:Array.from({length:8},(_,n)=>({name:'\0'.repeat(78)+String(n).padStart(2,'0'),category:'testing'}))});
+  }
+  const largeDb=new DatabaseSync(dbPath);
+  const largeSource=JSON.parse(largeDb.prepare('SELECT data FROM plans WHERE id=?').get(large.plan_id).data);
+  largeDb.close();
+  assert.ok(Buffer.byteLength(JSON.stringify({action:'event',plan:companionPlan(largeSource)}))>65536,
+    'regression fixture must exceed the old 64 KiB IPC limit');
+  await delivered(large.plan_id,largeUpdate.revision);
+  checks.push('maximum valid MCP payload crosses the native IPC boundary');
   await sendCompanion(socket,{action:'select',id:bid});
   await sendCompanion(socket,{action:'snapshot',name:'integration'});
   await writeFile(join(fixture,'report.json'),JSON.stringify({checks,passed:checks.length,fixture},null,2));

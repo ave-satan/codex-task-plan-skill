@@ -202,6 +202,14 @@ usleep(500000)
     const current = (await sendCompanion(socket, { action: 'status' })).state;
     return !current.planSwitcherExpanded && current.hoveredPlanID === null
       && !current.window.planHoverExitPending && !current.window.planTooltipVisible;
+  }).catch(async error => {
+    const current = (await sendCompanion(socket, { action: 'status' })).state;
+    console.error('exit fixture', JSON.stringify({hovered:current.hoveredPlanID,
+      expanded:current.planSwitcherExpanded, tray:current.planSwitcherTrayExpanded,
+      exitPending:current.window.planHoverExitPending, tooltip:current.window.planTooltipVisible,
+      pointer:[current.window.mouseX,current.window.mouseY],
+      tooltipFrame:current.window.planTooltipFrame}));
+    throw error;
   });
   await signals.get('REOPEN').promise;
   await eventually(async () => {

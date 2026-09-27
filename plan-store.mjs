@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { companionPlan, companionDelivery, launchCompanionForCreation } from './companion-bridge.mjs';
 
 // Outside the versioned plugin cache. Each MCP process shares this database.
@@ -14,9 +14,12 @@ export function openPlanStore() {
   const version = db.prepare('PRAGMA user_version').get().user_version;
   if (version > 1) throw new Error(`Unsupported task plan storage version: ${version}`);
   db.exec('CREATE TABLE IF NOT EXISTS plans (id TEXT PRIMARY KEY, data TEXT NOT NULL); PRAGMA user_version=1;');
+  db.exec('CREATE TABLE IF NOT EXISTS store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  db.prepare('INSERT OR IGNORE INTO store_meta(key,value) VALUES(?,?)').run('generation', randomUUID());
+  const generation = db.prepare('SELECT value FROM store_meta WHERE key=?').get('generation').value;
   const upsert = db.prepare('INSERT INTO plans(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data');
   const socket = process.env.TASK_PLAN_COMPANION_SOCKET;
-  const source = createHash('sha256').update(path).digest('hex').slice(0, 16);
+  const source = 'dbv2:' + createHash('sha256').update(path).update('\0').update(generation).digest('hex').slice(0, 32);
   if (socket) db.exec('CREATE TABLE IF NOT EXISTS companion_outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, plan_id TEXT UNIQUE NOT NULL, data TEXT NOT NULL, created INTEGER NOT NULL)');
   const delivery = socket ? companionDelivery(db, socket) : null;
   delivery?.kick();

@@ -15,7 +15,8 @@ const thread='00000000-0000-4000-8000-000000000009';
 async function connect() {
   const client = new Client({name:'restart-smoke',version:'1'});
   const transport = new StdioClientTransport({command:process.execPath,args:[join(root,'server.mjs')],cwd:root,
-    env:{...process.env,CODEX_HOME:fixture,CODEX_SQLITE_HOME:fixture,TASK_PLAN_DB:join(fixture,'plans.sqlite')}});
+    env:{...process.env,CODEX_HOME:fixture,CODEX_SQLITE_HOME:fixture,TASK_PLAN_DB:join(fixture,'plans.sqlite'),
+      TASK_PLAN_COMPANION_SOCKET:'',TASK_PLAN_COMPANION_AUTOSTART:'0'}});
   await client.connect(transport); clients.push(client); return {client,transport};
 }
 async function call(client,name,args) {

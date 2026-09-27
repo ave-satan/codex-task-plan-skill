@@ -10,7 +10,8 @@ const transport = new StdioClientTransport({
   command: process.execPath,
   args: [join(root, "server.mjs")],
   cwd: root,
-  env: { ...process.env, TASK_PLAN_DB: ':memory:' },
+  env: { ...process.env, TASK_PLAN_DB: ':memory:',
+    TASK_PLAN_COMPANION_SOCKET: '', TASK_PLAN_COMPANION_AUTOSTART: '0' },
 });
 const client = new Client(
   { name: "codex-task-plan-smoke", version: "0.1.0" },
@@ -372,6 +373,51 @@ try {
   if (blockedParent.structuredContent?.plan?.steps?.[0]?.status !== "blocked") {
     throw new Error("Cancelled subplan did not block its parent step");
   }
+
+  const frozenRoot = await callWithSnapshot(client, {
+    name: "create_task_plan", arguments: { title: "Frozen hierarchy", steps: ["Delegate", "Finish"] },
+  });
+  const frozenRootId = frozenRoot.structuredContent.plan_id;
+  const frozenChild = await callWithSnapshot(client, {
+    name: "create_task_plan", arguments: { title: "Frozen child", steps: ["Work", "Check"],
+      parent_plan_id: frozenRootId, parent_step_id: "step-1" },
+  });
+  const frozenChildId = frozenChild.structuredContent.plan_id;
+  const firstCancel = await callWithSnapshot(client, { name: "cancel_task_plan", arguments: { plan_id: frozenRootId } });
+  for (const request of [
+    { name: "update_task_plan_step", arguments: { plan_id: frozenRootId, step_id: "step-2", status: "in_progress" } },
+    { name: "update_task_plan_step", arguments: { plan_id: frozenChildId, step_id: "step-1", status: "in_progress" } },
+    { name: "revise_task_plan", arguments: { plan_id: frozenChildId, add_steps: ["Too late"] } },
+    { name: "create_task_plan", arguments: { title: "Grandchild", steps: ["A", "B"],
+      parent_plan_id: frozenChildId, parent_step_id: "step-1" } },
+  ]) {
+    const rejected = await client.callTool(request);
+    if (!rejected.isError) throw new Error(`${request.name} mutated a cancelled plan hierarchy`);
+  }
+  const repeatedCancel = await callWithSnapshot(client, {
+    name: "cancel_task_plan", arguments: { plan_id: frozenRootId },
+  });
+  if (repeatedCancel.structuredContent.revision !== firstCancel.structuredContent.revision) {
+    throw new Error("Repeated cancellation changed a terminal plan");
+  }
+
+  const clearable = await callWithSnapshot(client, {
+    name: "create_task_plan", arguments: { title: "Clear background activity", steps: ["Wait", "Continue"] },
+  });
+  const clearableId = clearable.structuredContent.plan_id;
+  await callWithSnapshot(client, { name: "update_task_plan_step", arguments: {
+    plan_id: clearableId, step_id: "step-1", status: "in_progress", parallel_activity: "Build running" },
+  });
+  const cleared = await callWithSnapshot(client, { name: "update_task_plan_step", arguments: {
+    plan_id: clearableId, step_id: "step-1", status: "in_progress", parallel_activity: "" },
+  });
+  if (cleared.structuredContent.plan.steps[0].parallelActivity !== "") {
+    throw new Error("Background activity could not be cleared");
+  }
+  const concurrentForeground = await client.callTool({ name: "update_task_plan_step", arguments: {
+    plan_id: clearableId, step_id: "step-2", status: "in_progress" },
+  });
+  if (!concurrentForeground.isError) throw new Error("Cleared activity still bypassed foreground guard");
 
   console.log("Smoke test passed: sequential main-agent guard, honest parallel work, layout, animation, revision, and linked plans are valid.");
 } finally {

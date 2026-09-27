@@ -21,7 +21,7 @@ export function companionPlan(plan) {
   if (plan.parentPlanId) return null;
   const paused = plan.goalLink?.state === 'linked' && plan.goalLink.status === 'paused';
   return { id: plan.id, title: plan.title, status: plan.status,
-    sourceRevision: plan.revision, createdAt: plan.createdAt,
+    sourceRevision: plan.revision, createdAt: plan.createdAt, completedAt: plan.completedAt,
     steps: plan.steps.map(step => ({ id: step.id, title: step.title,
       status: paused && step.status === 'in_progress' ? 'paused' : step.status,
       progress: step.progress, note: step.note, agents: step.agents ?? [] })) };

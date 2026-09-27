@@ -10,7 +10,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const expected = ["research", "architecture", "design", "implementation", "diagnostics",
   "testing", "review", "data", "documentation", "operations"];
 const transport = new StdioClientTransport({ command: process.execPath,
-  args: [join(root, "server.mjs")], cwd: root, env: { ...process.env, TASK_PLAN_DB: ':memory:' } });
+  args: [join(root, "server.mjs")], cwd: root, env: { ...process.env, TASK_PLAN_DB: ':memory:',
+    TASK_PLAN_COMPANION_SOCKET: '', TASK_PLAN_COMPANION_AUTOSTART: '0' } });
 const client = new Client({ name: "icons-smoke", version: "1.0.0" }, { capabilities: {} });
 await client.connect(transport);
 const call = async (name, args) => {

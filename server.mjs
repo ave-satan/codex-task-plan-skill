@@ -35,6 +35,9 @@ function registerAppTool(server, name, config, handler) {
         if (plan.status === "completed") {
           throw new Error("Completed task plans are read-only. Create a new plan for new work; do not reuse or reopen a completed plan.");
         }
+        if (plan.status === "cancelled" && !(name === "cancel_task_plan" && plan.id === args[0].plan_id)) {
+          throw new Error("Cancelled task plans are read-only. Create a new plan for new work.");
+        }
         plan = plan.parentPlanId ? requirePlan(plan.parentPlanId) : null;
       }
     }
@@ -256,7 +259,9 @@ registerAppTool(
     let parentStep = null;
     if (parentPlanId) {
       parent = requirePlan(parentPlanId);
-      if (parent.status !== "active") throw new Error("Cannot attach a subplan to an inactive plan");
+      for (let ancestor = parent; ancestor; ancestor = ancestor.parentPlanId ? requirePlan(ancestor.parentPlanId) : null) {
+        if (ancestor.status !== "active") throw new Error("Cannot attach a subplan to an inactive plan hierarchy");
+      }
       parentStep = parent.steps.find((item) => item.id === parentStepId);
       if (!parentStep) throw new Error(`Parent task plan step not found: ${parentStepId}`);
       if (parentStep.status === "completed" || parentStep.status === "skipped") {
@@ -466,7 +471,7 @@ registerAppTool(
       progress: z.number().int().min(0).max(100).nullable().optional().describe("Measured percentage only. null means unknown and shows an indeterminate activity bar. Omit to preserve it during the same step; update note at meaningful checkpoints, never invent percentages."),
       note: z.string().max(240).optional(),
       agents: z.array(agentSchema).max(8).optional(),
-      parallel_activity: z.string().min(1).max(160).optional(),
+      parallel_activity: z.string().max(160).optional().describe("Describe real background work, or pass an empty string to clear it."),
     },
     annotations: {
       readOnlyHint: false,
@@ -525,7 +530,7 @@ registerAppTool(
     else if (progress !== undefined) step.progress = progress;
     else if (status === "in_progress" && ["pending", "completed", "skipped"].includes(previousStatus)) step.progress = null;
     if (note !== undefined) step.note = note;
-    else if (parallelActivity !== undefined) step.note = parallelActivity;
+    else if (parallelActivity) step.note = parallelActivity;
     touch(plan);
     propagatePlanProgress(plan);
     return resultFor(plan, `Updated ${stepId} to ${status}.`, {}, stepId, true);
@@ -653,6 +658,7 @@ registerAppTool(
   },
   async ({ plan_id: planId }) => {
     const plan = requirePlan(planId);
+    if (plan.status === "cancelled") return resultFor(plan, `Task plan ${plan.id} is already cancelled.`, {}, null, true);
     plan.status = "cancelled";
     plan.completedAt = new Date().toISOString();
     touch(plan);

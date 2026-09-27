@@ -19,7 +19,9 @@ const other = "00000000-0000-4000-8000-000000000002";
 const client = new Client({ name: "goal-smoke", version: "1.0.0" });
 const transport = new StdioClientTransport({
   command: process.execPath, args: [join(root, "server.mjs")],
-  env: { ...process.env, CODEX_HOME: fixture, CODEX_SQLITE_HOME: fixture }, cwd: root,
+  env: { ...process.env, CODEX_HOME: fixture, CODEX_SQLITE_HOME: fixture,
+    TASK_PLAN_DB: join(fixture, 'plans.sqlite'), TASK_PLAN_COMPANION_SOCKET: '',
+    TASK_PLAN_COMPANION_AUTOSTART: '0' }, cwd: root,
 });
 const call = async (name, args) => {
   const result = await callWithSnapshot(client, { name, arguments: args });

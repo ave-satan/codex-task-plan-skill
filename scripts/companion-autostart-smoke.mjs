@@ -16,7 +16,8 @@ async function state() { return (await sendCompanion(socket,{action:'status'})).
 async function connect() {
   const client=new Client({name:'autostart-test',version:'1'});
   await client.connect(new StdioClientTransport({command:process.execPath,args:[join(root,'server.mjs')],cwd:root,
-    env:{...process.env,CODEX_HOME:fixture,TASK_PLAN_DB:join(fixture,'plans.sqlite'),TASK_PLAN_COMPANION_SOCKET:socket,
+    env:{...process.env,CODEX_HOME:fixture,CODEX_SQLITE_HOME:fixture,
+      TASK_PLAN_DB:join(fixture,'plans.sqlite'),TASK_PLAN_COMPANION_SOCKET:socket,
       TASK_PLAN_COMPANION_AUTOSTART:'1',TASK_PLAN_COMPANION_BINARY:process.env.COMPANION_BINARY,PLAN_COMPANION_HOST:'local.hidden.test'}}));
   clients.push(client);return client;
 }
