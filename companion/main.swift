@@ -1055,9 +1055,9 @@ struct PlanIconSwitcher: View {
             Color.clear.frame(width: PanelMetrics.iconColumn, height: PanelMetrics.iconColumn)
             if let active = store.active {
                 if store.hoveredPlanID != nil {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .fill(CodexPalette.raised.opacity(0.96))
-                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .stroke(CodexPalette.border, lineWidth: 0.7))
                         .frame(width: PanelMetrics.iconColumn + 12 + (store.planSwitcherExpanded ? CGFloat(otherPlans.count) * 28 : 0),
                                height: 34)
