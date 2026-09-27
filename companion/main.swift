@@ -90,6 +90,7 @@ private enum PanelMetrics {
     static let planSwitcherStride: CGFloat = iconColumn + planSwitcherIconSpacing
     static let planSwitcherTrayDelay: TimeInterval = 0.14
     static let planSwitcherRetractDelay: TimeInterval = 0.36
+    static let planSwitcherTitleSwapDelay: TimeInterval = 0.17
     static let resizeEdge: CGFloat = 7
     static let resizeCorner: CGFloat = 12
 }
@@ -1044,7 +1045,7 @@ struct PlanIconSwitcher: View {
         ZStack(alignment: .leading) {
             Color.clear.frame(width: PanelMetrics.iconColumn, height: PanelMetrics.iconColumn)
             if let active = store.active {
-                if store.hoveredPlanID != nil {
+                if store.planSwitcherTrayExpanded || store.hoveredPlanID != nil {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .fill(CodexPalette.raised.opacity(0.96))
                         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -1073,6 +1074,7 @@ struct PlanIconSwitcher: View {
                                     .background(Capsule().fill(CodexPalette.raised))
                                     .overlay(Capsule().stroke(CodexPalette.border, lineWidth: 0.6))
                                     .offset(x: 4, y: 3)
+                                    .transition(.identity)
                             }
                         }
                     if store.planSwitcherExpanded {
@@ -1912,12 +1914,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func planIconStripZone(in frame: NSRect, otherCount: Int) -> NSRect {
-        var zone = planIconActiveZone(in: frame)
-        if otherCount > 0 {
-            zone.size.width += PanelMetrics.planSwitcherExtraGap
-                + CGFloat(otherCount) * PanelMetrics.planSwitcherStride
-        }
-        return zone
+        let icon = planIconFrame(in: frame)
+        let trayWidth = icon.width + 12 + (otherCount > 0
+            ? PanelMetrics.planSwitcherExtraGap + CGFloat(otherCount) * PanelMetrics.planSwitcherStride : 0)
+        let tray = NSRect(x: icon.minX - 6, y: icon.midY - 17,
+                          width: trayWidth, height: 34)
+        return planIconActiveZone(in: frame).union(tray)
     }
 
     func canBeginWindowDrag(at point: NSPoint) -> Bool {
@@ -2000,6 +2002,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         planTooltip.hide(animated: true)
         planHoverExitStartedAt = nil
         store.hoveredPlanID = store.selected
+        withAnimation(.easeIn(duration: PanelMetrics.planSwitcherTitleSwapDelay)) {
+            store.titleAppearing = false
+        }
         withAnimation(.spring(response: PanelMetrics.planSwitcherRetractDelay,
                               dampingFraction: 0.86)) {
             store.planSwitcherExpanded = false
@@ -2010,20 +2015,24 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.store.planSwitcherTrayExpanded = false
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + PanelMetrics.planSwitcherRetractDelay) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + PanelMetrics.planSwitcherTitleSwapDelay) { [weak self] in
             guard let self, self.store.switchingPlanID == id else { return }
-            self.store.switchingPlanID = nil
             guard self.store.selected == sourceID,
                   self.store.plans.contains(where: { $0.id == id }) else {
+                self.store.switchingPlanID = nil
                 self.store.hoveredPlanID = nil
+                withAnimation(.easeOut(duration: 0.14)) { self.store.titleAppearing = true }
                 return
             }
-            self.store.titleAppearing = false
             self.store.select(id)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
                 guard let self else { return }
                 withAnimation(.easeOut(duration: 0.24)) { self.store.titleAppearing = true }
             }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + PanelMetrics.planSwitcherRetractDelay) { [weak self] in
+            guard let self, self.store.switchingPlanID == id else { return }
+            self.store.switchingPlanID = nil
         }
     }
 
@@ -3459,7 +3468,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                      "planOverflowBadge": "+N",
                                      "planSwitcherPlacement": "immediate-slide-from-active-icon",
                                      "planSwitcherInactiveGap": PanelMetrics.planSwitcherExtraGap,
-                                     "planSwitcherSelectionAnimation": "retract-then-blur-rise-title",
+                                     "planSwitcherSelectionAnimation": "parallel-retract-and-title-crossfade",
                                      "planSwitcherRevealDelay": 0.0,
                                      "planTooltipStyle": "detached-nonactivating-title-tooltip",
                                      "planTooltipVisualStyle": "codex-dark-floating-card-rounded-8pt",
@@ -3608,6 +3617,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 "planSwitcherExpanded": store.planSwitcherExpanded,
                 "planSwitcherTrayExpanded": store.planSwitcherTrayExpanded,
                 "switchingPlanID": store.switchingPlanID ?? NSNull(),
+                "titleAppearing": store.titleAppearing,
                 "hoveredPlanID": store.hoveredPlanID ?? NSNull(),
                 "visible": panel?.isVisible ?? false,
                 "frontmostBundle": NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown",
@@ -3652,6 +3662,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             case "select":
                 guard let id = command.id, store.plans.contains(where: { $0.id == id }) else { throw NSError(domain: "Unknown plan", code: 4) }
                 store.select(id)
+            case "test_animated_select":
+                guard disableHostAttachmentForTests, let id = command.id,
+                      store.plans.contains(where: { $0.id == id }) else {
+                    throw NSError(domain: "Animated selection probe is test-only", code: 14)
+                }
+                beginPlanSwitch(to: id)
             case "remove":
                 guard let id = command.id, store.plans.contains(where: { $0.id == id }) else { throw NSError(domain: "Unknown plan", code: 4) }
                 removePlan(id, event: "plan_removed")

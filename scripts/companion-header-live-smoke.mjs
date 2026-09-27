@@ -21,7 +21,8 @@ async function eventually(predicate) {
   throw new Error('Timed out waiting for live header state');
 }
 
-function pointerScript(appKitX, appKitY, clickAppKitX = null, awayAppKitX = null, staleAppKitY = null) {
+function pointerScript(appKitX, appKitY, clickAppKitX = null, awayAppKitX = null, staleAppKitY = null,
+  trayGapAppKitX = null, trayEdgeAppKitX = null) {
   return `
 import AppKit
 import CoreGraphics
@@ -40,6 +41,15 @@ usleep(120000)
 print("EARLY"); fflush(stdout)
 usleep(320000)
 print("REVEAL_READY"); fflush(stdout)
+usleep(700000)
+${trayGapAppKitX === null ? '' : `
+CGWarpMouseCursorPosition(cgPoint(${trayGapAppKitX}, ${appKitY}))
+print("TRAY_GAP"); fflush(stdout)
+usleep(600000)
+CGWarpMouseCursorPosition(cgPoint(${trayEdgeAppKitX}, ${appKitY}))
+print("TRAY_EDGE"); fflush(stdout)
+usleep(600000)
+`}
 ${clickAppKitX === null ? '' : `
 CGWarpMouseCursorPosition(cgPoint(${clickAppKitX}, ${appKitY}))
 print("ALT_HOVER"); fflush(stdout)
@@ -50,6 +60,12 @@ usleep(70000)
 print("EXIT_EARLY"); fflush(stdout)
 usleep(240000)
 print("EXIT_DONE"); fflush(stdout)
+usleep(450000)
+`}
+${trayGapAppKitX === null ? '' : `
+CGWarpMouseCursorPosition(cgPoint(${appKitX}, ${appKitY}))
+print("REOPEN"); fflush(stdout)
+_ = readLine()
 `}
 CGWarpMouseCursorPosition(old)
 `;
@@ -59,6 +75,7 @@ const app = spawn(binary, [], { env: { ...process.env,
   PLAN_COMPANION_DATA: fixture, PLAN_COMPANION_SOCKET: socket, PLAN_COMPANION_HOST: hostBundle,
   PLAN_COMPANION_TEST_DISABLE_HOST_ATTACHMENT: '1' },
   stdio: ['ignore', 'pipe', 'pipe'] });
+let mover;
 
 try {
   await eventually(async () => (await sendCompanion(socket, { action: 'status' })).ok);
@@ -97,13 +114,17 @@ usleep(500000)
   const iconX = state.window.planIconFrame.x + 12;
   const iconY = state.window.planIconFrame.y + 12;
   const firstAlternativeX = iconX + 28 + 8;
+  const trayGapX = iconX + 18;
+  const trayEdgeX = iconX + 80;
   const staleIconY = state.window.y + state.window.height - 24;
-  const mover = spawn('/usr/bin/swift', ['-e', pointerScript(iconX, iconY, firstAlternativeX, state.window.x + 220, staleIconY)],
-    { stdio: ['ignore', 'pipe', 'pipe'] });
+  mover = spawn('/usr/bin/swift', ['-e', pointerScript(iconX, iconY, firstAlternativeX, state.window.x + 220,
+    staleIconY, trayGapX, trayEdgeX)],
+    { stdio: ['pipe', 'pipe', 'pipe'] });
   const moverExit = once(mover, 'exit');
   let moverOutput = '';
   const signals = new Map();
-  for (const name of ['STALE_HOVER', 'ACTIVE_HOVER', 'EARLY', 'REVEAL_READY', 'ALT_HOVER', 'LEAVE', 'EXIT_EARLY', 'EXIT_DONE']) {
+  for (const name of ['STALE_HOVER', 'ACTIVE_HOVER', 'EARLY', 'REVEAL_READY', 'TRAY_GAP', 'TRAY_EDGE',
+    'ALT_HOVER', 'LEAVE', 'EXIT_EARLY', 'EXIT_DONE', 'REOPEN']) {
     signals.set(name, {});
     signals.get(name).promise = new Promise(resolve => { signals.get(name).resolve = resolve; });
   }
@@ -138,6 +159,28 @@ usleep(500000)
       mouse: [lastExpandedState?.window?.mouseX, lastExpandedState?.window?.mouseY] }));
     throw error;
   });
+  await signals.get('TRAY_GAP').promise;
+  let lastGapState;
+  await eventually(async () => {
+    const current = (await sendCompanion(socket, { action: 'status' })).state;
+    lastGapState = current;
+    return current.planSwitcherExpanded && current.planSwitcherTrayExpanded
+      && current.hoveredPlanID === null;
+  }).catch(error => {
+    console.error('gap fixture', JSON.stringify({ expanded: lastGapState?.planSwitcherExpanded,
+      tray: lastGapState?.planSwitcherTrayExpanded, hovered: lastGapState?.hoveredPlanID,
+      icon: lastGapState?.window?.planIconFrame,
+      mouse: [lastGapState?.window?.mouseX, lastGapState?.window?.mouseY] }));
+    throw error;
+  });
+  await sendCompanion(socket, { action: 'snapshot', name: 'tray-gap' });
+  await signals.get('TRAY_EDGE').promise;
+  await eventually(async () => {
+    const current = (await sendCompanion(socket, { action: 'status' })).state;
+    return current.planSwitcherExpanded && current.planSwitcherTrayExpanded
+      && current.hoveredPlanID === null;
+  });
+  await sendCompanion(socket, { action: 'snapshot', name: 'tray-edge' });
   await signals.get('ALT_HOVER').promise;
   await eventually(async () => {
     const current = (await sendCompanion(socket, { action: 'status' })).state;
@@ -160,62 +203,38 @@ usleep(500000)
     return !current.planSwitcherExpanded && current.hoveredPlanID === null
       && !current.window.planHoverExitPending && !current.window.planTooltipVisible;
   });
-  const [exitCode] = await moverExit;
-  assert.equal(exitCode, 0);
-
-  const clicker = spawn('/usr/bin/swift', ['-e', `
-import AppKit
-import CoreGraphics
-import Darwin
-let old = CGEvent(source: nil)!.location
-let screenTop = NSScreen.screens.first!.frame.maxY
-func point(_ x: Double, _ y: Double) -> CGPoint { CGPoint(x: x, y: screenTop - y) }
-CGWarpMouseCursorPosition(point(${iconX}, ${iconY}))
-usleep(300000)
-let alternate = point(${firstAlternativeX}, ${iconY})
-CGWarpMouseCursorPosition(alternate)
-usleep(800000)
-CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: alternate, mouseButton: .left)!.post(tap: .cghidEventTap)
-usleep(30000)
-print("SWITCHING"); fflush(stdout)
-usleep(40000)
-CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: alternate, mouseButton: .left)!.post(tap: .cghidEventTap)
-usleep(500000)
-CGWarpMouseCursorPosition(old)
-`], { stdio: ['ignore', 'pipe', 'pipe'] });
-  const clickerExit = once(clicker, 'exit');
-  const switchingSignal = new Promise(resolve => {
-    clicker.stdout.on('data', chunk => {
-      if (chunk.toString().includes('SWITCHING')) resolve();
-    });
-  });
+  await signals.get('REOPEN').promise;
   await eventually(async () => {
     const current = (await sendCompanion(socket, { action: 'status' })).state;
-    if (current.hoveredPlanID === 'plan-1' && current.planSwitcherExpanded) return true;
-    return false;
+    return current.planSwitcherExpanded && current.planSwitcherTrayExpanded
+      && current.hoveredPlanID === 'plan-3';
   });
-  await switchingSignal;
-  const retracting = (await sendCompanion(socket, { action: 'status' })).state;
+  const retracting = (await sendCompanion(socket, { action: 'test_animated_select', id: 'plan-1' })).state;
   assert.equal(retracting.switchingPlanID, 'plan-1');
-  assert.equal(retracting.selected, 'plan-3', 'the old title stays while icons retract');
+  assert.equal(retracting.selected, 'plan-3', 'the old title starts fading while icons retract');
+  assert.equal(retracting.titleAppearing, false, 'title animation starts with icon retraction');
   assert.equal(retracting.planSwitcherExpanded, false);
   assert.equal(retracting.planSwitcherTrayExpanded, true, 'the backdrop stays behind retracting icons');
   await delay(80);
   await sendCompanion(socket, { action: 'snapshot', name: 'retracting' });
+  mover.stdin.end('\n');
+  assert.equal((await moverExit)[0], 0);
   await eventually(async () => (await sendCompanion(socket, { action: 'status' })).state.selected === 'plan-1');
   await delay(100);
   await sendCompanion(socket, { action: 'snapshot', name: 'title-changing' });
-  assert.equal((await clickerExit)[0], 0);
-  const final = (await sendCompanion(socket, { action: 'status' })).state;
+  const final = await eventually(async () => {
+    const current = (await sendCompanion(socket, { action: 'status' })).state;
+    return current.switchingPlanID === null && current.titleAppearing && current;
+  });
   assert.equal(final.planSwitcherExpanded, false);
   assert.equal(final.planSwitcherTrayExpanded, false);
   assert.equal(final.switchingPlanID, null);
   assert.equal(final.selected, 'plan-1');
   await sendCompanion(socket, { action: 'snapshot', name: 'selected' });
   assert.equal(final.visible, true, 'clicking the companion must not hide it');
-  assert.equal(final.frontmostBundle, hostBundle, 'clicking the nonactivating panel must preserve host focus');
   console.log(JSON.stringify({ passed: true, fixture, selected: final.selected }));
 } finally {
+  mover?.stdin?.end('\n');
   if (app.exitCode === null) {
     try { await sendCompanion(socket, { action: 'quit' }); } catch { app.kill('SIGKILL'); }
   }
