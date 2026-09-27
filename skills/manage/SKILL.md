@@ -65,7 +65,7 @@ After creating a root plan, follow its `next_action`: check the host goal, creat
 
 ## Honest step progress
 
-For a newly started step, omit `progress` when no defensible percentage exists. Unknown progress is `null` and displays an indeterminate activity bar, not zero percent. Use numeric percentages only for measured completion; use `progress: null` to explicitly clear a percentage that is no longer meaningful. During the same step, omitting the field preserves its value. Update the step's concise `note` at substantive checkpoints (a result produced, verification started, or a concrete blocker found), even if the percentage is unknown. Short steps may move straight to completion. Do not invent intermediate percentages or generate updates merely to animate the UI.
+For a newly started step, omit `progress` when no defensible percentage exists. Unknown progress is `null` and displays an indeterminate activity bar, not zero percent. Use numeric percentages only for measured completion; use `progress: null` to explicitly clear a percentage that is no longer meaningful. During the same step, omitting the field preserves its value. Update the step's concise `note` at substantive checkpoints (a result produced, verification started, or a concrete blocker found), even if the percentage is unknown. Write the note as a short, plain-language hint about the result or next action; omit implementation details such as API names, file paths, hashes, and diagnostic measurements unless the user needs them to decide or verify something. Short steps may move straight to completion. Do not invent intermediate percentages or generate updates merely to animate the UI.
 
 ## Goal observation details
 
