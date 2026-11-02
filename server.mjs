@@ -14,6 +14,7 @@ import { readGoal, syncGoalLink } from "./goal-reader.mjs";
 import { workCategories, workCategoryIds } from "./work-categories.mjs";
 import { openPlanStore } from "./plan-store.mjs";
 import { sendCompanion } from "./companion-bridge.mjs";
+import { hostThreadId, planThreadId, latestChatPlan, planEmoji } from "./chat-panel.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const categoryIcons = Object.fromEntries(await Promise.all(workCategories.map(async ({ id, label }) => [
@@ -23,9 +24,11 @@ const widgetHtml = (await readFile(join(root, "widget.html"), "utf8"))
   .replace("__PLAN_HEADER_ICON__", `data:image/png;base64,${(await readFile(join(root, "assets", "duck-foreman.png"))).toString("base64")}`)
   .replace("/*__WORK_CATEGORY_ICONS__*/ {}", JSON.stringify(categoryIcons).replaceAll("<", "\\u003c"));
 const widgetUri = "ui://codex-task-plan/plan.html";
+const panelUri = "ui://codex-task-plan/chat-panel-v1.html";
 const plans = new Map();
 const store = openPlanStore();
-const companionSocket = process.env.TASK_PLAN_COMPANION_SOCKET;
+const panelMode = process.env.TASK_PLAN_PRESENTATION === 'panel';
+const companionSocket = panelMode ? null : process.env.TASK_PLAN_COMPANION_SOCKET;
 const companionMode = Boolean(companionSocket);
 function registerAppTool(server, name, config, handler) {
   return registerTool(server, name, config, (...args) => store.run(plans, () => {
@@ -42,7 +45,11 @@ function registerAppTool(server, name, config, handler) {
       }
     }
     return handler(...args);
-  }, name === 'show_task_plan' ? args[0].plan_id : null));
+  }, name === 'show_task_plan' ? args[0].plan_id : null, {
+    stampSnapshot: ['open_task_plan_panel', 'get_chat_task_plan'].includes(name),
+    ...(['open_task_plan_panel', 'get_chat_task_plan', 'ack_task_plan_panel', 'get_task_plan_panel_status'].includes(name)
+      ? { scopeThreadId: hostThreadId(args[1]) } : {}),
+  }));
 }
 const reanchorThreshold = 4;
 
@@ -219,10 +226,12 @@ function propagatePlanProgress(plan) {
 }
 
 const server = new McpServer(
-  { name: "codex-task-plan", version: "0.1.0" },
+  { name: "codex-task-plan", version: "0.2.0", title: "Task Plan" },
   {
     instructions: "Only the main agent manages this plugin. Delegated subagents must not call any task-plan tools; they report results to the main agent. Keep completed agent icons with status=completed; only working agents count as parallel work. " +
-      "Create one plan only for substantial decomposed work. Build ordinary main-agent steps as a real sequential execution path. Keep its returned plan_id with the task context and accept a known plan_id from another conversation when explicitly requested. Revise the existing plan when scope changes instead of replacing it. Only one ordinary main-agent step may be in progress; additional concurrent steps require assigned agents, linked subplans, or a concise parallel_activity describing real background work. Attach the names of currently working subagents to their steps. Render once after creation. Before each later user-visible progress response, record its visual weight as 1, 2, or 3 points. Render another copy only when that tool returns should_show=true; this requires both 4 accumulated points and plan progress changed since the previous render.",
+      "Create one plan only for substantial decomposed work. Build ordinary main-agent steps as a real sequential execution path. Keep its returned plan_id with the task context and accept a known plan_id from another conversation when explicitly requested. Revise the existing plan when scope changes instead of replacing it. Only one ordinary main-agent step may be in progress; additional concurrent steps require assigned agents, linked subplans, or a concise parallel_activity describing real background work. Attach the names of currently working subagents to their steps. " +
+      (panelMode ? "Open open_task_plan_panel once beside the current chat after goal binding. The panel refreshes itself. Do not re-open it or call record_task_plan_output/show_task_plan for ordinary updates. Never show another chat's plan as a fallback."
+        : "Render once after creation. Score user-visible progress responses with record_task_plan_output; render another copy only when should_show=true."),
   },
 );
 
@@ -251,7 +260,11 @@ registerAppTool(
       "openai/toolInvocation/invoked": "Task plan created",
     },
   },
-  async ({ title, steps, parent_plan_id: parentPlanId, parent_step_id: parentStepId, thread_id: threadId }) => {
+  async ({ title, steps, parent_plan_id: parentPlanId, parent_step_id: parentStepId, thread_id: threadId }, extra) => {
+    const hostThread = hostThreadId(extra);
+    if ((extra?._meta?.thread_id !== undefined || extra?._meta?.threadId !== undefined) && !hostThread) throw new Error('Invalid chat identity metadata.');
+    if (hostThread && threadId && hostThread !== threadId.toLowerCase()) throw new Error('thread_id does not match the current chat.');
+    threadId = hostThread ?? threadId?.toLowerCase();
     if ((parentPlanId && !parentStepId) || (!parentPlanId && parentStepId)) {
       throw new Error("parent_plan_id and parent_step_id must be provided together");
     }
@@ -259,6 +272,9 @@ registerAppTool(
     let parentStep = null;
     if (parentPlanId) {
       parent = requirePlan(parentPlanId);
+      const owner = planThreadId(parent, plans);
+      if (hostThread && owner && hostThread !== owner) throw new Error('Cannot attach a subplan to another chat.');
+      threadId = owner ?? threadId;
       for (let ancestor = parent; ancestor; ancestor = ancestor.parentPlanId ? requirePlan(ancestor.parentPlanId) : null) {
         if (ancestor.status !== "active") throw new Error("Cannot attach a subplan to an inactive plan hierarchy");
       }
@@ -276,12 +292,14 @@ registerAppTool(
       status: "active",
       revision: 1,
       createdAt: now,
+      createdSequence: store.nextPlanSequence(),
       updatedAt: now,
       completedAt: null,
       reanchorScore: 0,
       lastShownRevision: null,
       parentPlanId: parentPlanId ?? null,
       parentStepId: parentStepId ?? null,
+      threadId: threadId ?? null,
       goalLink: !parentPlanId && threadId ? {
         threadId, expectedObjective: title, goalId: null,
         state: "waiting", status: null, availability: "available",
@@ -411,8 +429,8 @@ registerAppTool(
   "record_task_plan_output",
   {
     title: "Score task plan distance",
-    description:
-      "Record the visual weight of exactly one upcoming user-visible progress response: 1 point for short, 2 for medium, or 3 for long. Call once immediately before that response. Returns should_show=true only after at least 4 accumulated points and when the plan changed since its previous render.",
+    description: panelMode ? "Legacy compatibility tool. Not needed for the live chat panel; it never requests another card in panel mode."
+      : "Record the visual weight of exactly one upcoming user-visible progress response: 1 point for short, 2 for medium, or 3 for long. Call once immediately before that response. Returns should_show=true only after at least 4 accumulated points and when the plan changed since its previous render.",
     inputSchema: {
       plan_id: z.string().uuid(),
       points: z.number().int().min(1).max(3),
@@ -435,7 +453,7 @@ registerAppTool(
     plan.reanchorScore = Math.min(reanchorThreshold, plan.reanchorScore + points);
     const progressChanged =
       plan.lastShownRevision === null || plan.revision > plan.lastShownRevision;
-    const shouldShow = plan.reanchorScore >= reanchorThreshold && progressChanged;
+    const shouldShow = !panelMode && plan.reanchorScore >= reanchorThreshold && progressChanged;
     return {
       structuredContent: {
         plan_id: plan.id,
@@ -560,8 +578,17 @@ registerAppTool(
       "openai/toolInvocation/invoked": "Task plan read",
     },
   },
-  async ({ plan_id: planId, thread_id: threadId }) => {
+  async ({ plan_id: planId, thread_id: threadId }, extra) => {
     const plan = requirePlan(planId);
+    if (threadId) {
+      threadId = threadId.toLowerCase();
+      const hostThread = hostThreadId(extra);
+      if ((extra?._meta?.thread_id !== undefined || extra?._meta?.threadId !== undefined) && !hostThread) throw new Error('Invalid chat identity metadata.');
+      if (hostThread && hostThread !== threadId) throw new Error('thread_id does not match the current chat.');
+    }
+    const owner = planThreadId(plan, plans);
+    if (threadId && owner && owner !== threadId.toLowerCase()) throw new Error('The plan is already bound to another chat.');
+    if (threadId && !plan.parentPlanId && !plan.threadId) plan.threadId = threadId.toLowerCase();
     if (threadId && !plan.parentPlanId && !plan.goalLink) {
       plan.goalLink = { threadId, expectedObjective: plan.originalTitle ?? plan.title, goalId: null,
         state: "waiting", status: null, availability: "available" };
@@ -575,8 +602,8 @@ registerAppTool(
   "show_task_plan",
   {
     title: "Show task plan",
-    description:
-      "Render the current always-open plan inline. Call after creation, when record_task_plan_output returns should_show=true, or when the user explicitly asks for another copy. Do not call it for any other normal update. The view field is retained for compatibility.",
+    description: panelMode ? "Legacy compatibility read. Use open_task_plan_panel to open this chat's live plan; do not call this on ordinary updates."
+      : "Render the current always-open plan inline. Call after creation, when record_task_plan_output returns should_show=true, or when the user explicitly asks for another copy. Do not call it for any other normal update. The view field is retained for compatibility.",
     inputSchema: {
       plan_id: z.string().uuid(),
       view: z.enum(["full", "chip"]).default("chip"),
@@ -587,7 +614,7 @@ registerAppTool(
       destructiveHint: false,
       idempotentHint: true,
     },
-    _meta: companionMode ? {} : {
+    _meta: companionMode || panelMode ? {} : {
       ui: { resourceUri: widgetUri, visibility: ["model", "app"] },
       "openai/outputTemplate": widgetUri,
       "openai/widgetAccessible": true,
@@ -599,13 +626,72 @@ registerAppTool(
     const plan = requirePlan(planId);
     plan.lastShownRevision = plan.revision;
     plan.reanchorScore = 0;
-    return resultFor(plan, companionMode ? `Queued task plan ${plan.id} for the companion. Delivery is asynchronous; selection is unchanged.` : `Rendered task plan ${plan.id}.`, {
+    return resultFor(plan, panelMode ? `Task plan ${plan.id} is available in this chat's Task Plan panel.` : companionMode ? `Queued task plan ${plan.id} for the companion. Delivery is asynchronous; selection is unchanged.` : `Rendered task plan ${plan.id}.`, {
       view,
       reanchor_score: plan.reanchorScore,
       shown_revision: plan.lastShownRevision,
     });
   },
 );
+
+function chatPanelResult(extra) {
+  const threadId = hostThreadId(extra);
+  const plan = latestChatPlan(plans, threadId);
+  return {
+    structuredContent: { panel: true, thread_id: threadId,
+      plan: plan ? { ...snapshot(plan), emoji: planEmoji(plan.id) } : null,
+      ...(!threadId ? { message: 'Codex не передал ID этого чата. Открой Task Plan через меню панелей чата.' } : {}),
+    },
+    content: [{ type: 'text', text: plan ? 'План этого чата обновлён.' : 'В этом чате пока нет плана.' }],
+  };
+}
+const panelReadAnnotations = { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: true };
+registerAppTool(server, 'open_task_plan_panel', {
+  title: 'План этого чата', description: 'Open the current chat\'s Task Plan beside the conversation. Shows only this chat\'s plan and stays up to date without reopening.',
+  inputSchema: {}, annotations: panelReadAnnotations,
+  _meta: { ui: { resourceUri: panelUri, visibility: ['model', 'app'] }, 'openai/outputTemplate': panelUri,
+    'openai/ui': { entrypoints: [{ type: 'thread' }], preferredModelDisplayMode: 'fullscreen' } },
+}, async (_args, extra) => chatPanelResult(extra));
+registerAppTool(server, 'get_chat_task_plan', {
+  description: 'Read only the current host chat\'s plan. Chat identity comes from Codex metadata, never from UI arguments.',
+  inputSchema: {}, annotations: panelReadAnnotations, _meta: { ui: { visibility: ['app'] } },
+}, async (_args, extra) => chatPanelResult(extra));
+registerAppTool(server, 'ack_task_plan_panel', {
+  description: 'Record the UI revision rendered in one mounted chat panel.',
+  inputSchema: { instance_id: z.string().min(1).max(80), plan_id: z.string().uuid().optional(), revision: z.number().int().nonnegative().optional(), counter: z.string().max(40) },
+  annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
+  _meta: { ui: { visibility: ['app'] } },
+}, async (value, extra) => {
+  const threadId = hostThreadId(extra);
+  if (!threadId) throw new Error('Chat identity is unavailable.');
+  if (value.plan_id && planThreadId(requirePlan(value.plan_id), plans) !== threadId) throw new Error('The rendered plan belongs to another chat.');
+  store.recordPanelReceipt(threadId, value);
+  return { structuredContent: { acknowledged: true }, content: [] };
+});
+registerAppTool(server, 'get_task_plan_panel_status', {
+  description: 'Read rendering confirmations for the current chat\'s Task Plan panel.',
+  inputSchema: {}, annotations: panelReadAnnotations, _meta: { ui: { visibility: ['app', 'model'] } },
+}, async (_args, extra) => {
+  const threadId = hostThreadId(extra);
+  return { structuredContent: { thread_id: threadId, receipts: threadId ? store.panelReceipts(threadId) : [] }, content: [] };
+});
+
+async function panelHtml() {
+  const [html, sdk, bridge] = await Promise.all([
+    readFile(join(root, 'panel.html'), 'utf8'),
+    readFile(join(root, 'node_modules/@modelcontextprotocol/ext-apps/dist/src/app-with-deps.js'), 'utf8'),
+    readFile(join(root, 'panel-bridge.js'), 'utf8'),
+  ]);
+  const appClass = sdk.match(/(\w+) as App[},]/)?.[1];
+  if (!appClass) throw new Error('The MCP Apps SDK does not export App.');
+  return html.replace('/*__WORK_CATEGORY_ICONS__*/ {}', () => JSON.stringify(categoryIcons).replaceAll('<', '\\u003c'))
+    .replace('/*__PANEL_BRIDGE__*/', () => (sdk + '\n' + bridge.replace('__PANEL_APP_CLASS__', appClass)).replaceAll('</script', '<\\/script'));
+}
+registerAppResource(server, 'Task Plan — current chat', panelUri,
+  { description: 'Live Task Plan panel scoped to its host conversation.' }, async () => ({ contents: [{ uri: panelUri, mimeType: RESOURCE_MIME_TYPE,
+    text: await panelHtml(), _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] }, prefersBorder: false },
+      'openai/ui': { availableDisplayModes: ['fullscreen', 'inline'] }, 'openai/widgetMinFrameHeight': 0 },
+  }] }));
 
 registerAppTool(
   server,

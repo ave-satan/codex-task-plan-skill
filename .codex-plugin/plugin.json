@@ -1,15 +1,15 @@
 {
   "name": "task-plan",
-  "version": "0.1.0+codex.20260927071929",
-  "description": "Compact inline plans with a matching static Codex goal for long-running tasks.",
+  "version": "0.2.0+codex.20261102panel1",
+  "description": "Live task plans beside the conversation, with a separate plan for every chat and a matching static Codex goal.",
   "author": {
     "name": "Local developer"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "Task Plan",
-    "shortDescription": "Agent-managed inline plans for long tasks.",
-    "longDescription": "Creates compact revisable task plans, links subagent subplans to parent-step progress, tracks parallel work, and re-anchors the card only after enough visual output and a real progress change.",
+    "shortDescription": "План каждого чата в панели Codex.",
+    "longDescription": "Показывает рабочий план текущего чата рядом с перепиской. Живые обновления шагов, статусы субагентов и связь с целью Codex без повторного открытия панели.",
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": [
@@ -17,7 +17,7 @@
       "Write"
     ],
     "brandColor": "#4F8CFF",
-    "defaultPrompt": "Create and maintain an inline task plan for this work."
+    "defaultPrompt": "Create and maintain this chat's task plan in the Task Plan panel."
   },
   "mcpServers": "./.mcp.json"
 }

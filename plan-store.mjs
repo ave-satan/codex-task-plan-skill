@@ -16,31 +16,61 @@ export function openPlanStore() {
   db.exec('CREATE TABLE IF NOT EXISTS plans (id TEXT PRIMARY KEY, data TEXT NOT NULL); PRAGMA user_version=1;');
   db.exec('CREATE TABLE IF NOT EXISTS store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
   db.prepare('INSERT OR IGNORE INTO store_meta(key,value) VALUES(?,?)').run('generation', randomUUID());
+  db.prepare('INSERT OR IGNORE INTO store_meta(key,value) VALUES(?,?)').run('revision', '0');
   const generation = db.prepare('SELECT value FROM store_meta WHERE key=?').get('generation').value;
   const upsert = db.prepare('INSERT INTO plans(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data');
-  const socket = process.env.TASK_PLAN_COMPANION_SOCKET;
+  const socket = process.env.TASK_PLAN_PRESENTATION === 'panel' ? null : process.env.TASK_PLAN_COMPANION_SOCKET;
   const source = 'dbv2:' + createHash('sha256').update(path).update('\0').update(generation).digest('hex').slice(0, 32);
   if (socket) db.exec('CREATE TABLE IF NOT EXISTS companion_outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, plan_id TEXT UNIQUE NOT NULL, data TEXT NOT NULL, created INTEGER NOT NULL)');
   const delivery = socket ? companionDelivery(db, socket) : null;
   delivery?.kick();
   let queue = Promise.resolve();
+  db.exec('CREATE TABLE IF NOT EXISTS panel_receipts (thread_id TEXT NOT NULL, instance_id TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(thread_id, instance_id))');
   return {
-    run(plans, action, showPlanId = null) {
+    nextPlanSequence() {
+      const row = db.prepare('SELECT value FROM store_meta WHERE key=?').get('plan_sequence');
+      const next = Number(row?.value ?? 0) + 1;
+      db.prepare('INSERT INTO store_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('plan_sequence', String(next));
+      return next;
+    },
+    recordPanelReceipt(threadId, value) {
+      const previous = db.prepare('SELECT data FROM panel_receipts WHERE thread_id=? AND instance_id=?').get(threadId, value.instance_id);
+      const prior = previous ? JSON.parse(previous.data) : null;
+      const history = [...(prior?.history ?? []), { plan_id: value.plan_id ?? null, revision: value.revision ?? null, counter: value.counter }].slice(-8);
+      const at = new Date().toISOString();
+      db.prepare('INSERT INTO panel_receipts(thread_id,instance_id,data,updated_at) VALUES(?,?,?,?) ON CONFLICT(thread_id,instance_id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at')
+        .run(threadId, value.instance_id, JSON.stringify({ ...value, thread_id: threadId, history, at }), at);
+      db.prepare('DELETE FROM panel_receipts WHERE thread_id=? AND instance_id NOT IN (SELECT instance_id FROM panel_receipts WHERE thread_id=? ORDER BY updated_at DESC LIMIT 20)').run(threadId, threadId);
+    },
+    panelReceipts(threadId) {
+      return db.prepare('SELECT data FROM panel_receipts WHERE thread_id=? ORDER BY updated_at DESC LIMIT 10').all(threadId).map(row => JSON.parse(row.data));
+    },
+    run(plans, action, showPlanId = null, { stampSnapshot = false, ...options } = {}) {
       const operation = queue.then(async () => {
         db.exec('BEGIN IMMEDIATE');
         try {
           plans.clear();
           const before = new Map();
-          for (const row of db.prepare('SELECT id,data FROM plans').all()) {
+          const rows = Object.hasOwn(options, 'scopeThreadId')
+            ? options.scopeThreadId ? db.prepare(`WITH RECURSIVE selected(id,data) AS (
+                SELECT id,data FROM (SELECT id,data FROM plans
+                  WHERE json_extract(data,'$.parentPlanId') IS NULL
+                    AND lower(coalesce(json_extract(data,'$.threadId'),json_extract(data,'$.goalLink.threadId'))) = ?
+                  ORDER BY json_extract(data,'$.createdAt') DESC, coalesce(json_extract(data,'$.createdSequence'),0) DESC, id DESC LIMIT 1)
+                UNION ALL SELECT p.id,p.data FROM plans p JOIN selected parent ON json_extract(p.data,'$.parentPlanId') = parent.id
+              ) SELECT id,data FROM selected`).all(options.scopeThreadId) : []
+            : db.prepare('SELECT id,data FROM plans').all();
+          for (const row of rows) {
             const plan = JSON.parse(row.data);
             if (plan.id !== row.id || !Array.isArray(plan.steps)) throw new Error('Invalid task plan storage record');
             plans.set(row.id, plan); before.set(row.id, row.data);
           }
           const result = await action();
           let createdRoot = false;
+          let changed = false;
           for (const [id, plan] of plans) {
             const data = JSON.stringify(plan);
-            if (before.get(id) !== data) upsert.run(id, data);
+            if (before.get(id) !== data) { upsert.run(id, data); changed = true; }
             if (socket) {
               const projected = companionPlan(plan);
               const prior = before.has(id) ? companionPlan(JSON.parse(before.get(id))) : null;
@@ -56,6 +86,12 @@ export function openPlanStore() {
               }
             }
           }
+          let revision = Number(db.prepare('SELECT value FROM store_meta WHERE key=?').get('revision').value);
+          if (changed) {
+            revision += 1;
+            db.prepare('UPDATE store_meta SET value=? WHERE key=?').run(String(revision), 'revision');
+          }
+          if (stampSnapshot) result.structuredContent.storeVersion = { generation, revision };
           db.exec('COMMIT');
           // One launch attempt only for a newly COMMITTED root, never a replay/read/update.
           if (socket && createdRoot) void launchCompanionForCreation(socket);

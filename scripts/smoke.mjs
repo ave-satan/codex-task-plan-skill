@@ -94,7 +94,7 @@ try {
   }
 
   const skill = await readFile(join(root, "skills/manage/SKILL.md"), "utf8");
-  for (const marker of ["create_goal", "update_goal", "Set the goal objective to the plan title exactly", "Never recreate or update the goal", "revise_task_plan", "instead of creating a replacement", "record_task_plan_output", "should_show: true", "score reaches 4", "progress has changed", "Keep exactly one ordinary main-agent step active", "parallel_activity", "do not qualify as parallel work", "waiting_for_user", "direct answer or decision"]) {
+  for (const marker of ["create_goal", "update_goal", "Set the goal objective to the plan title exactly", "Never recreate or update the goal", "revise_task_plan", "instead of creating a replacement", "open_task_plan_panel", "Keep exactly one ordinary main-agent step active", "parallel_activity", "do not qualify as parallel work", "waiting_for_user", "direct answer or decision"]) {
     if (!skill.includes(marker)) throw new Error(`Goal lifecycle instruction missing: ${marker}`);
   }
   for (const marker of ["▤ <plan title>", "<total> этапов", "Готово, когда все этапы"]) {

@@ -12,13 +12,31 @@ processes share the same store. Plan revisions, hierarchy, goal identity, output
 score and last displayed revision survive restarts. Goal storage remains read-only.
 An unreadable/corrupt database is an error, not permission to reset stored plans.
 
-Create, get and show return full snapshots for context recovery and widget rendering.
+Root plans store a chat ID independently of their goal link. Older roots whose
+chat ID exists only in `goalLink.threadId` remain readable. The conversation panel
+uses only the chat ID injected by Codex into MCP request metadata, selects that
+chat's newest root, and never falls back to global plans. A completed root remains
+visible for 30 seconds; it is retained in storage afterwards. Older active roots
+do not reappear when a newer root finishes or is cancelled.
+
+The panel reads through MCP once per second while visible. A persistent store
+generation and monotonic revision order snapshots across server processes.
+Each chat's rendering confirmations are stored separately in `panel_receipts`.
+These confirmations do not mutate plans or their revisions.
+
+Create, get and show return full snapshots for context recovery.
 Update returns a compact plan summary and the changed step; revise returns a summary
 and newly allocated step IDs; cancel returns a summary. Use get when the complete
-state is needed. The widget still reads full snapshots through its existing API.
+state is needed. `open_task_plan_panel` and the app-only `get_chat_task_plan` return
+the current chat's panel snapshot. The installed configuration sets
+`TASK_PLAN_PRESENTATION=panel`; the separate companion is not launched and new
+inline cards are not emitted. Legacy inline/companion code remains available
+only to explicitly configured older integrations.
 Goal setup guidance is returned in next_action only when the relevant goal state
 changes, not duplicated in content or repeated after every update.
 
 Validation: run `scripts/restart-smoke.mjs` with the configured Node runtime.
 It exercises abrupt restart, concurrent processes, linked subplans, output scoring,
 goal identity, cancellation and compact response size through real MCP clients.
+Run `scripts/panel-smoke.mjs` for chat identity, cross-chat isolation, linked plans,
+external updates, terminal-state retention, and legacy ownership migration.

@@ -6,11 +6,7 @@
       "cwd": "/Users/Mr.Sergei/plugins/task-plan",
       "enabled": true,
       "env": {
-        "TASK_PLAN_COMPANION_SOCKET": "/Users/Mr.Sergei/.codex/task-plan/companion/control.sock",
-        "TASK_PLAN_COMPANION_AUTOSTART": "1",
-        "TASK_PLAN_NATIVE_EVENT_PROBE": "1",
-        "TASK_PLAN_TLS_CERT": "/Users/Mr.Sergei/Documents/Codex/playground/private/task-plan-tls/localhost.pem",
-        "TASK_PLAN_TLS_KEY": "/Users/Mr.Sergei/Documents/Codex/playground/private/task-plan-tls/localhost-key.pem"
+        "TASK_PLAN_PRESENTATION": "panel"
       },
       "default_tools_approval_mode": "approve",
       "startup_timeout_sec": 10,
