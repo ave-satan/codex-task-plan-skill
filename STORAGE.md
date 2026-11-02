@@ -24,6 +24,16 @@ generation and monotonic revision order snapshots across server processes.
 Each chat's rendering confirmations are stored separately in `panel_receipts`.
 These confirmations do not mutate plans or their revisions.
 
+The existing visible-panel reads also refresh a short-lived presence lease in
+`panel_presence`. `ensure_task_plan_panel` atomically reuses a live panel or an
+in-progress opening. It never returns UI metadata. When a panel is missing it
+returns a one-use token for `open_task_plan_panel`; this keeps reuse responses
+separate from the client's rendering session cache. A separate app-only menu
+renderer keeps the native **План этого чата** entrypoint. Duplicate mounted
+instances request closure of their own tab. Teardown releases presence; a
+15-second expiry covers interrupted cleanup without treating old render
+receipts as proof that a panel is still open.
+
 Create, get and show return full snapshots for context recovery.
 Update returns a compact plan summary and the changed step; revise returns a summary
 and newly allocated step IDs; cancel returns a summary. Use get when the complete

@@ -17,6 +17,7 @@ let panelDisposed = false;
 let panelTimer = null;
 let panelPendingAck = null;
 let panelAckInFlight = false;
+let panelReleaseInFlight = null;
 
 document.documentElement.dataset.panelInstance = panelInstanceId;
 const panelUUID = value => typeof value === 'string'
@@ -67,6 +68,16 @@ const panelAccept = (envelope, source, sequence = 0) => {
     return;
   }
   panelExpectedThread ??= thread;
+  if (envelope.panel_duplicate === true) {
+    panelIdentityViolation = true;
+    clearTimeout(panelTimer);
+    panelClear('План этого чата уже открыт', thread);
+    try {
+      if (typeof window.openai?.requestClose === 'function') window.openai.requestClose();
+      else void panelApp.requestTeardown().catch(() => {});
+    } catch { void panelApp.requestTeardown().catch(() => {}); }
+    return;
+  }
   const version = envelope.storeVersion;
   if (!version || typeof version.generation !== 'string' || !version.generation
       || !Number.isSafeInteger(version.revision) || version.revision < 0) {
@@ -115,7 +126,7 @@ const panelRefresh = () => {
   panelReadAbort = new AbortController();
   panelReadInFlight = Promise.resolve().then(async () => {
     try {
-      const result = await panelApp.callServerTool({ name: 'get_chat_task_plan', arguments: {} },
+      const result = await panelApp.callServerTool({ name: 'get_chat_task_plan', arguments: { instance_id: panelInstanceId } },
         { signal: panelReadAbort.signal, timeout: 8000 });
       if (panelDisposed) return;
       if (result.isError || result.structuredContent?.panel !== true) {
@@ -166,6 +177,12 @@ const panelDispose = (close = false) => {
     try { Promise.resolve(panelApp?.close?.()).catch(() => {}); } catch {}
   }
 };
+const panelRelease = () => {
+  if (!panelConnected) return Promise.resolve();
+  panelReleaseInFlight ??= panelApp.callServerTool({ name: 'release_task_plan_panel', arguments: { instance_id: panelInstanceId } },
+    { timeout: 1500 }).catch(() => {});
+  return panelReleaseInFlight;
+};
 
 window.taskPlanPanel = {
   onState(listener) {
@@ -187,7 +204,11 @@ window.taskPlanPanel = {
     void panelDrainAck();
   },
 };
-window.addEventListener('pagehide', () => panelDispose(true), { once: true });
+window.addEventListener('pagehide', () => {
+  const release = panelRelease();
+  panelDispose();
+  void release.finally(() => { try { Promise.resolve(panelApp?.close?.()).catch(() => {}); } catch {} });
+}, { once: true });
 document.addEventListener('visibilitychange', () => {
   clearTimeout(panelTimer);
   if (!document.hidden) void panelRefresh();
@@ -197,11 +218,11 @@ try {
   if (window.parent === window) {
     panelClear('Открой панель из чата Codex');
   } else {
-    panelApp = new __PANEL_APP_CLASS__({ name: 'Task Plan', version: '0.2.0' }, {}, { autoResize: true });
+    panelApp = new __PANEL_APP_CLASS__({ name: 'Task Plan', version: '0.2.1' }, {}, { autoResize: true });
     // Register all host notifications before the initialization handshake.
     panelApp.ontoolresult = result => panelAccept(result.structuredContent, 'notification');
     panelApp.onhostcontextchanged = () => { void panelRefresh(); };
-    panelApp.onteardown = async () => { panelDispose(); return {}; };
+    panelApp.onteardown = async () => { panelDispose(); await panelRelease(); return {}; };
     panelApp.onerror = () => {
       if (panelConnected && !panelDisposed) panelUnavailable();
     };

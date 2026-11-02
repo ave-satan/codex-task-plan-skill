@@ -35,6 +35,7 @@
     .divider { height: 1px; margin: 0 12px; background: var(--border); }
     .steps { padding: 7px 12px 13px; background: var(--steps); }
     .step { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 10px; padding: 6px 0; }
+    .step.pending { align-items: first baseline; }
     .status { display: flex; width: 28px; height: 21px; align-items: center; justify-content: center; padding-top: 2px; }
     svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
     .status svg { width: 19px; height: 19px; overflow: visible; }
@@ -45,7 +46,7 @@
     .status.waiting_for_user svg { animation: question-breathe 3.6s ease-in-out infinite; }
     .status.blocked { color: var(--red); }
     .status.skipped { color: #85858a; }
-    .status.pending { align-items: flex-end; gap: 3px; padding-bottom: 4px; color: #68686e; }
+    .status.pending { height: 3px; align-items: baseline; gap: 3px; padding: 0; color: #68686e; }
     .dot { display: block; width: 3px; height: 3px; background: currentColor; border-radius: 50%; animation: dot-hop var(--dot-period, 4.6s) ease-in-out infinite; }
     .dot:nth-child(2) { animation-delay: .12s; }
     .dot:nth-child(3) { animation-delay: .24s; }

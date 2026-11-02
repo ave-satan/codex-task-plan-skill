@@ -32,9 +32,12 @@ async function call(name, args = {}, thread = chatA, target = client) {
 const read = (thread = chatA) => call('get_chat_task_plan', {}, thread);
 try {
   const tools = (await client.listTools()).tools;
-  const entry = tools.find(tool => tool.name === 'open_task_plan_panel');
+  const entry = tools.find(tool => tool.name === 'render_task_plan_panel');
   assert.deepEqual(entry._meta['openai/ui'].entrypoints, [{ type: 'thread' }]);
   assert.equal(entry._meta['openai/ui'].preferredModelDisplayMode, 'fullscreen');
+  assert.deepEqual(entry._meta.ui.visibility, ['app']);
+  assert.ok(!tools.find(tool => tool.name === 'ensure_task_plan_panel')._meta?.ui?.resourceUri,
+    'Presence check must never attach a UI resource');
   assert.deepEqual(tools.find(tool => tool.name === 'get_chat_task_plan')._meta.ui.visibility, ['app']);
   assert.ok(!tools.find(tool => tool.name === 'show_task_plan')._meta?.ui?.resourceUri, 'Panel mode must not render repeated inline cards');
 
@@ -42,6 +45,34 @@ try {
   const b = await call('create_task_plan', { title: 'Chat B private plan', steps: ['B first', 'B second'] }, chatB);
   assert.equal((await read(chatA)).plan.id, a.plan_id);
   assert.equal((await read(chatB)).plan.id, b.plan_id);
+  const firstOpen = await raw('ensure_task_plan_panel');
+  assert.equal(firstOpen.structuredContent.should_open, true);
+  assert.equal(firstOpen._meta?.ui?.resourceUri, undefined);
+  const token = firstOpen.structuredContent.open_token;
+  assert.ok(token);
+  assert.equal((await raw('open_task_plan_panel', { open_token: token }, chatB)).isError, true, 'Opening token is chat-scoped');
+  assert.equal((await call('open_task_plan_panel', { open_token: token })).plan.id, a.plan_id);
+  assert.equal((await raw('open_task_plan_panel', { open_token: token })).isError, true, 'Opening token is single-use');
+  const pendingOpen = await raw('ensure_task_plan_panel');
+  assert.equal(pendingOpen.structuredContent.should_open, false);
+  assert.equal(pendingOpen._meta?.ui?.resourceUri, undefined);
+  const instance = randomUUID();
+  await call('get_chat_task_plan', { instance_id: instance });
+  const reusedOpen = await raw('ensure_task_plan_panel');
+  assert.equal(reusedOpen.structuredContent.active, true);
+  assert.equal(reusedOpen.structuredContent.should_open, false);
+  assert.equal(reusedOpen._meta?.ui?.resourceUri, undefined);
+  const duplicate = await call('get_chat_task_plan', { instance_id: randomUUID() });
+  assert.equal(duplicate.panel_duplicate, true);
+  assert.equal((await call('get_task_plan_panel_status')).instance_id, instance);
+  await call('release_task_plan_panel', { instance_id: instance }, chatB);
+  assert.equal((await call('get_task_plan_panel_status')).active, true, 'Another chat cannot release this panel');
+  await call('release_task_plan_panel', { instance_id: instance });
+  assert.equal((await call('get_task_plan_panel_status')).active, false);
+  assert.equal((await raw('ensure_task_plan_panel')).structuredContent.should_open, true);
+  const raceChat = randomUUID();
+  const racers = await Promise.all([raw('ensure_task_plan_panel', {}, raceChat), raw('ensure_task_plan_panel', {}, raceChat, writer)]);
+  assert.equal(racers.filter(result => result.structuredContent.should_open).length, 1, 'Concurrent openers must emit exactly one UI resource');
   assert.equal((await read(emptyChat)).plan, null);
   assert.equal((await read(null)).plan, null, 'A shared process env must never select a chat');
   assert.equal((await read(null)).thread_id, null);
@@ -112,5 +143,6 @@ try {
   assert.ok(!resource.contents[0].text.includes('/*__PANEL_BRIDGE__*/'));
   assert.ok(!resource.contents[0].text.includes('/*__WORK_CATEGORY_ICONS__*/'));
   console.log(JSON.stringify({ passed: true, fixture, checks: ['host-derived chat isolation', 'unknown and conflicting chat identities', 'external writer visibility',
-    'linked subplans', 'latest-plan selection and expiry', 'legacy ownership and restart persistence', 'chat-scoped receipts', 'no companion or repeated inline cards'] }, null, 2));
+    'linked subplans', 'latest-plan selection and expiry', 'legacy ownership and restart persistence', 'chat-scoped receipts',
+    'active and concurrent opener reuse', 'instance ownership and release', 'no companion or repeated inline cards'] }, null, 2));
 } finally { await Promise.allSettled([client.close(), writer.close()]); }

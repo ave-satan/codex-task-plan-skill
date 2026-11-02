@@ -26,7 +26,42 @@ export function openPlanStore() {
   delivery?.kick();
   let queue = Promise.resolve();
   db.exec('CREATE TABLE IF NOT EXISTS panel_receipts (thread_id TEXT NOT NULL, instance_id TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(thread_id, instance_id))');
+  db.exec('CREATE TABLE IF NOT EXISTS panel_presence (thread_id TEXT PRIMARY KEY, instance_id TEXT, seen_at INTEGER NOT NULL DEFAULT 0, opening_until INTEGER NOT NULL DEFAULT 0)');
+  const presence = threadId => {
+    const row = db.prepare('SELECT instance_id,seen_at,opening_until FROM panel_presence WHERE thread_id=?').get(threadId);
+    const now = Date.now();
+    return { active: Boolean(row?.instance_id && now - row.seen_at < 15000),
+      opening: Boolean(row?.opening_until > now), instance_id: row?.instance_id ?? null };
+  };
   return {
+    panelPresence(threadId) { return presence(threadId); },
+    claimPanelOpen(threadId) {
+      const current = presence(threadId);
+      if (current.active || current.opening) return { ...current, should_open: false };
+      db.prepare('INSERT INTO panel_presence(thread_id,instance_id,seen_at,opening_until) VALUES(?,NULL,0,?) ON CONFLICT(thread_id) DO UPDATE SET instance_id=NULL,seen_at=0,opening_until=excluded.opening_until')
+        .run(threadId, Date.now() + 15000);
+      const token = randomUUID();
+      db.prepare('INSERT INTO store_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('panel_open:' + threadId, token);
+      return { active: false, opening: true, instance_id: null, should_open: true, open_token: token };
+    },
+    consumePanelOpen(threadId, token) {
+      const state = presence(threadId);
+      const stored = db.prepare('SELECT value FROM store_meta WHERE key=?').get('panel_open:' + threadId);
+      if (state.active || !state.opening || stored?.value !== token) return false;
+      db.prepare('DELETE FROM store_meta WHERE key=?').run('panel_open:' + threadId);
+      return true;
+    },
+    touchPanel(threadId, instanceId) {
+      const current = presence(threadId);
+      if (current.active && current.instance_id !== instanceId) return false;
+      db.prepare('INSERT INTO panel_presence(thread_id,instance_id,seen_at,opening_until) VALUES(?,?,?,0) ON CONFLICT(thread_id) DO UPDATE SET instance_id=excluded.instance_id,seen_at=excluded.seen_at,opening_until=0')
+        .run(threadId, instanceId, Date.now());
+      db.prepare('DELETE FROM store_meta WHERE key=?').run('panel_open:' + threadId);
+      return true;
+    },
+    releasePanel(threadId, instanceId) {
+      db.prepare('UPDATE panel_presence SET instance_id=NULL,seen_at=0 WHERE thread_id=? AND instance_id=?').run(threadId, instanceId);
+    },
     nextPlanSequence() {
       const row = db.prepare('SELECT value FROM store_meta WHERE key=?').get('plan_sequence');
       const next = Number(row?.value ?? 0) + 1;

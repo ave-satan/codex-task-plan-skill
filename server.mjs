@@ -24,7 +24,7 @@ const widgetHtml = (await readFile(join(root, "widget.html"), "utf8"))
   .replace("__PLAN_HEADER_ICON__", `data:image/png;base64,${(await readFile(join(root, "assets", "duck-foreman.png"))).toString("base64")}`)
   .replace("/*__WORK_CATEGORY_ICONS__*/ {}", JSON.stringify(categoryIcons).replaceAll("<", "\\u003c"));
 const widgetUri = "ui://codex-task-plan/plan.html";
-const panelUri = "ui://codex-task-plan/chat-panel-v1.html";
+const panelUri = "ui://codex-task-plan/chat-panel-v3.html";
 const plans = new Map();
 const store = openPlanStore();
 const panelMode = process.env.TASK_PLAN_PRESENTATION === 'panel';
@@ -46,8 +46,8 @@ function registerAppTool(server, name, config, handler) {
     }
     return handler(...args);
   }, name === 'show_task_plan' ? args[0].plan_id : null, {
-    stampSnapshot: ['open_task_plan_panel', 'get_chat_task_plan'].includes(name),
-    ...(['open_task_plan_panel', 'get_chat_task_plan', 'ack_task_plan_panel', 'get_task_plan_panel_status'].includes(name)
+    stampSnapshot: ['open_task_plan_panel', 'render_task_plan_panel', 'get_chat_task_plan'].includes(name),
+    ...(['ensure_task_plan_panel', 'open_task_plan_panel', 'render_task_plan_panel', 'get_chat_task_plan', 'release_task_plan_panel', 'ack_task_plan_panel', 'get_task_plan_panel_status'].includes(name)
       ? { scopeThreadId: hostThreadId(args[1]) } : {}),
   }));
 }
@@ -226,11 +226,11 @@ function propagatePlanProgress(plan) {
 }
 
 const server = new McpServer(
-  { name: "codex-task-plan", version: "0.2.0", title: "Task Plan" },
+  { name: "codex-task-plan", version: "0.2.1", title: "Task Plan" },
   {
     instructions: "Only the main agent manages this plugin. Delegated subagents must not call any task-plan tools; they report results to the main agent. Keep completed agent icons with status=completed; only working agents count as parallel work. " +
       "Create one plan only for substantial decomposed work. Build ordinary main-agent steps as a real sequential execution path. Keep its returned plan_id with the task context and accept a known plan_id from another conversation when explicitly requested. Revise the existing plan when scope changes instead of replacing it. Only one ordinary main-agent step may be in progress; additional concurrent steps require assigned agents, linked subplans, or a concise parallel_activity describing real background work. Attach the names of currently working subagents to their steps. " +
-      (panelMode ? "Open open_task_plan_panel once beside the current chat after goal binding. The panel refreshes itself. Do not re-open it or call record_task_plan_output/show_task_plan for ordinary updates. Never show another chat's plan as a fallback."
+      (panelMode ? "Call ensure_task_plan_panel after goal binding. Only if should_open=true, call open_task_plan_panel with the returned open_token. When active/opening, keep the existing panel; do not call any rendering tool. The panel refreshes itself. Do not call record_task_plan_output/show_task_plan for ordinary updates. Never show another chat's plan as a fallback."
         : "Render once after creation. Score user-visible progress responses with record_task_plan_output; render another copy only when should_show=true."),
   },
 );
@@ -646,16 +646,53 @@ function chatPanelResult(extra) {
   };
 }
 const panelReadAnnotations = { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: true };
-registerAppTool(server, 'open_task_plan_panel', {
-  title: 'План этого чата', description: 'Open the current chat\'s Task Plan beside the conversation. Shows only this chat\'s plan and stays up to date without reopening.',
+registerAppTool(server, 'ensure_task_plan_panel', {
+  title: 'Reuse active Task Plan', description: 'Always call this before opening Task Plan. Never renders UI. If active/opening, reuse the existing panel. Only when should_open=true call open_task_plan_panel with the returned open_token.',
   inputSchema: {}, annotations: panelReadAnnotations,
+  _meta: { ui: { visibility: ['model', 'app'] } },
+}, async (_args, extra) => {
+  const threadId = hostThreadId(extra);
+  const state = threadId ? store.claimPanelOpen(threadId) : { active: false, opening: false, should_open: false };
+  return { structuredContent: { thread_id: threadId, ...state }, content: [{ type: 'text', text: state.should_open
+    ? 'Call open_task_plan_panel once with the returned open_token.' : state.active ? 'Панель этого чата уже открыта.'
+      : state.opening ? 'Панель этого чата уже открывается.' : 'Открой панель через меню этого чата.' }] };
+});
+registerAppTool(server, 'open_task_plan_panel', {
+  title: 'План этого чата', description: 'Render the missing Task Plan panel ONLY after ensure_task_plan_panel returned should_open=true. Pass its one-use open_token. Never call when the panel is active or opening.',
+  inputSchema: { open_token: z.string().uuid() }, annotations: panelReadAnnotations,
   _meta: { ui: { resourceUri: panelUri, visibility: ['model', 'app'] }, 'openai/outputTemplate': panelUri,
+    'openai/ui': { preferredModelDisplayMode: 'fullscreen' } },
+}, async ({ open_token: token }, extra) => {
+  const threadId = hostThreadId(extra);
+  if (!threadId || !store.consumePanelOpen(threadId, token)) throw new Error('Call ensure_task_plan_panel first; no new panel is needed or the opening token expired.');
+  return chatPanelResult(extra);
+});
+registerAppTool(server, 'render_task_plan_panel', {
+  title: 'План этого чата', description: 'Conversation menu entrypoint for Task Plan. Models use open_task_plan_panel instead.',
+  inputSchema: {}, annotations: panelReadAnnotations,
+  _meta: { ui: { resourceUri: panelUri, visibility: ['app'] }, 'openai/outputTemplate': panelUri,
     'openai/ui': { entrypoints: [{ type: 'thread' }], preferredModelDisplayMode: 'fullscreen' } },
 }, async (_args, extra) => chatPanelResult(extra));
 registerAppTool(server, 'get_chat_task_plan', {
   description: 'Read only the current host chat\'s plan. Chat identity comes from Codex metadata, never from UI arguments.',
-  inputSchema: {}, annotations: panelReadAnnotations, _meta: { ui: { visibility: ['app'] } },
-}, async (_args, extra) => chatPanelResult(extra));
+  inputSchema: { instance_id: z.string().uuid().optional() }, annotations: panelReadAnnotations, _meta: { ui: { visibility: ['app'] } },
+}, async ({ instance_id: instanceId }, extra) => {
+  const threadId = hostThreadId(extra);
+  if (threadId && instanceId && !store.touchPanel(threadId, instanceId)) {
+    return { structuredContent: { panel: true, thread_id: threadId, plan: null, panel_duplicate: true },
+      content: [{ type: 'text', text: 'Панель этого чата уже открыта.' }] };
+  }
+  return chatPanelResult(extra);
+});
+registerAppTool(server, 'release_task_plan_panel', {
+  description: 'Release this mounted panel instance when its tab closes.',
+  inputSchema: { instance_id: z.string().uuid() },
+  annotations: { ...panelReadAnnotations, readOnlyHint: false }, _meta: { ui: { visibility: ['app'] } },
+}, async ({ instance_id: instanceId }, extra) => {
+  const threadId = hostThreadId(extra);
+  if (threadId) store.releasePanel(threadId, instanceId);
+  return { structuredContent: { released: true }, content: [] };
+});
 registerAppTool(server, 'ack_task_plan_panel', {
   description: 'Record the UI revision rendered in one mounted chat panel.',
   inputSchema: { instance_id: z.string().min(1).max(80), plan_id: z.string().uuid().optional(), revision: z.number().int().nonnegative().optional(), counter: z.string().max(40) },
@@ -673,7 +710,8 @@ registerAppTool(server, 'get_task_plan_panel_status', {
   inputSchema: {}, annotations: panelReadAnnotations, _meta: { ui: { visibility: ['app', 'model'] } },
 }, async (_args, extra) => {
   const threadId = hostThreadId(extra);
-  return { structuredContent: { thread_id: threadId, receipts: threadId ? store.panelReceipts(threadId) : [] }, content: [] };
+  return { structuredContent: { thread_id: threadId, ...(threadId ? store.panelPresence(threadId) : { active: false, opening: false, instance_id: null }),
+    receipts: threadId ? store.panelReceipts(threadId) : [] }, content: [] };
 });
 
 async function panelHtml() {

@@ -1,6 +1,6 @@
 {
   "name": "task-plan",
-  "version": "0.2.0+codex.20261102panel1",
+  "version": "0.2.1+codex.20261102panel3",
   "description": "Live task plans beside the conversation, with a separate plan for every chat and a matching static Codex goal.",
   "author": {
     "name": "Local developer"
