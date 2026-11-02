@@ -34,6 +34,10 @@ instances request closure of their own tab. Teardown releases presence; a
 15-second expiry covers interrupted cleanup without treating old render
 receipts as proof that a panel is still open.
 
+When a fresh valid read confirms that a previously displayed plan has expired
+or been cancelled, the panel requests closure of its own tab. An initially empty
+panel, identity errors, and transient connection failures do not close the tab.
+
 Create, get and show return full snapshots for context recovery.
 Update returns a compact plan summary and the changed step; revise returns a summary
 and newly allocated step IDs; cancel returns a summary. Use get when the complete

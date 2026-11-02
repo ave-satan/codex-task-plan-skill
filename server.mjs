@@ -24,7 +24,7 @@ const widgetHtml = (await readFile(join(root, "widget.html"), "utf8"))
   .replace("__PLAN_HEADER_ICON__", `data:image/png;base64,${(await readFile(join(root, "assets", "duck-foreman.png"))).toString("base64")}`)
   .replace("/*__WORK_CATEGORY_ICONS__*/ {}", JSON.stringify(categoryIcons).replaceAll("<", "\\u003c"));
 const widgetUri = "ui://codex-task-plan/plan.html";
-const panelUri = "ui://codex-task-plan/chat-panel-v3.html";
+const panelUri = "ui://codex-task-plan/chat-panel-v4.html";
 const plans = new Map();
 const store = openPlanStore();
 const panelMode = process.env.TASK_PLAN_PRESENTATION === 'panel';

@@ -18,6 +18,8 @@ let panelTimer = null;
 let panelPendingAck = null;
 let panelAckInFlight = false;
 let panelReleaseInFlight = null;
+let panelHasShownPlan = false;
+let panelCloseRequested = false;
 
 document.documentElement.dataset.panelInstance = panelInstanceId;
 const panelUUID = value => typeof value === 'string'
@@ -50,6 +52,17 @@ const panelUnavailable = () => {
   // last rendered plan and animations; unknown/changed identity still clears it.
   if (!panelLatest?.plan) panelClear('План временно недоступен', panelExpectedThread);
 };
+const panelRequestClose = async () => {
+  if (panelCloseRequested || panelDisposed) return;
+  panelCloseRequested = true;
+  try {
+    if (typeof window.openai?.requestClose === 'function') {
+      await window.openai.requestClose();
+      return;
+    }
+  } catch { /* Fall back to the standard MCP Apps teardown request. */ }
+  try { await panelApp.requestTeardown(); } catch { /* The host owns the tab. */ }
+};
 const panelAccept = (envelope, source, sequence = 0) => {
   if (panelDisposed || !envelope || envelope.panel !== true) return;
   if (panelIdentityViolation) return;
@@ -72,10 +85,7 @@ const panelAccept = (envelope, source, sequence = 0) => {
     panelIdentityViolation = true;
     clearTimeout(panelTimer);
     panelClear('План этого чата уже открыт', thread);
-    try {
-      if (typeof window.openai?.requestClose === 'function') window.openai.requestClose();
-      else void panelApp.requestTeardown().catch(() => {});
-    } catch { void panelApp.requestTeardown().catch(() => {}); }
+    void panelRequestClose();
     return;
   }
   const version = envelope.storeVersion;
@@ -107,6 +117,10 @@ const panelAccept = (envelope, source, sequence = 0) => {
     return;
   }
   panelPublish({ ...envelope, thread_id: thread });
+  if (envelope.plan) panelHasShownPlan = true;
+  // Only a fresh, valid read can confirm that a previously displayed plan
+  // expired or was cancelled. Errors and an initially empty panel stay open.
+  else if (source === 'read' && panelHasShownPlan) void panelRequestClose();
 };
 const panelSchedule = () => {
   clearTimeout(panelTimer);
