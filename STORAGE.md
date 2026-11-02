@@ -27,7 +27,8 @@ These confirmations do not mutate plans or their revisions.
 The existing visible-panel reads also refresh a short-lived presence lease in
 `panel_presence`. `ensure_task_plan_panel` atomically reuses a live panel or an
 in-progress opening. It never returns UI metadata. When a panel is missing it
-returns a one-use token for `open_task_plan_panel`; this keeps reuse responses
+returns a one-use token for `open_task_plan_panel`, which renders inline by
+default; this keeps reuse responses
 separate from the client's rendering session cache. A separate app-only menu
 renderer keeps the native **План этого чата** entrypoint. Duplicate mounted
 instances request closure of their own tab. Teardown releases presence; a
@@ -43,8 +44,9 @@ Update returns a compact plan summary and the changed step; revise returns a sum
 and newly allocated step IDs; cancel returns a summary. Use get when the complete
 state is needed. `open_task_plan_panel` and the app-only `get_chat_task_plan` return
 the current chat's panel snapshot. The installed configuration sets
-`TASK_PLAN_PRESENTATION=panel`; the separate companion is not launched and new
-inline cards are not emitted. Legacy inline/companion code remains available
+`TASK_PLAN_PRESENTATION=panel`; the live view appears inline in the conversation.
+A separate tab opens only on a user click. The separate companion is not launched
+and ordinary updates do not emit repeated cards. Legacy inline/companion code remains available
 only to explicitly configured older integrations.
 Goal setup guidance is returned in next_action only when the relevant goal state
 changes, not duplicated in content or repeated after every update.

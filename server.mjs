@@ -24,7 +24,7 @@ const widgetHtml = (await readFile(join(root, "widget.html"), "utf8"))
   .replace("__PLAN_HEADER_ICON__", `data:image/png;base64,${(await readFile(join(root, "assets", "duck-foreman.png"))).toString("base64")}`)
   .replace("/*__WORK_CATEGORY_ICONS__*/ {}", JSON.stringify(categoryIcons).replaceAll("<", "\\u003c"));
 const widgetUri = "ui://codex-task-plan/plan.html";
-const panelUri = "ui://codex-task-plan/chat-panel-v4.html";
+const panelUri = "ui://codex-task-plan/chat-panel-v5.html";
 const plans = new Map();
 const store = openPlanStore();
 const panelMode = process.env.TASK_PLAN_PRESENTATION === 'panel';
@@ -230,7 +230,7 @@ const server = new McpServer(
   {
     instructions: "Only the main agent manages this plugin. Delegated subagents must not call any task-plan tools; they report results to the main agent. Keep completed agent icons with status=completed; only working agents count as parallel work. " +
       "Create one plan only for substantial decomposed work. Build ordinary main-agent steps as a real sequential execution path. Keep its returned plan_id with the task context and accept a known plan_id from another conversation when explicitly requested. Revise the existing plan when scope changes instead of replacing it. Only one ordinary main-agent step may be in progress; additional concurrent steps require assigned agents, linked subplans, or a concise parallel_activity describing real background work. Attach the names of currently working subagents to their steps. " +
-      (panelMode ? "Call ensure_task_plan_panel after goal binding. Only if should_open=true, call open_task_plan_panel with the returned open_token. When active/opening, keep the existing panel; do not call any rendering tool. The panel refreshes itself. Do not call record_task_plan_output/show_task_plan for ordinary updates. Never show another chat's plan as a fallback."
+      (panelMode ? "Call ensure_task_plan_panel after goal binding. Only if should_open=true, call open_task_plan_panel with the returned open_token to show the live plan inline in the conversation. Opening a separate tab is a user action, never automatic. When active/opening, keep the existing view; do not call any rendering tool. The view refreshes itself. Do not call record_task_plan_output/show_task_plan for ordinary updates. Never show another chat's plan as a fallback."
         : "Render once after creation. Score user-visible progress responses with record_task_plan_output; render another copy only when should_show=true."),
   },
 );
@@ -658,10 +658,10 @@ registerAppTool(server, 'ensure_task_plan_panel', {
       : state.opening ? 'Панель этого чата уже открывается.' : 'Открой панель через меню этого чата.' }] };
 });
 registerAppTool(server, 'open_task_plan_panel', {
-  title: 'План этого чата', description: 'Render the missing Task Plan panel ONLY after ensure_task_plan_panel returned should_open=true. Pass its one-use open_token. Never call when the panel is active or opening.',
+  title: 'План этого чата', description: 'Show the missing live plan inline in the conversation ONLY after ensure_task_plan_panel returned should_open=true. Pass its one-use open_token. Never automatically open a separate tab. Never call when the plan view is active or opening.',
   inputSchema: { open_token: z.string().uuid() }, annotations: panelReadAnnotations,
   _meta: { ui: { resourceUri: panelUri, visibility: ['model', 'app'] }, 'openai/outputTemplate': panelUri,
-    'openai/ui': { preferredModelDisplayMode: 'fullscreen' } },
+    'openai/ui': { preferredModelDisplayMode: 'inline' } },
 }, async ({ open_token: token }, extra) => {
   const threadId = hostThreadId(extra);
   if (!threadId || !store.consumePanelOpen(threadId, token)) throw new Error('Call ensure_task_plan_panel first; no new panel is needed or the opening token expired.');

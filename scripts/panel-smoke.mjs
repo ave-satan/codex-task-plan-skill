@@ -36,6 +36,9 @@ try {
   assert.deepEqual(entry._meta['openai/ui'].entrypoints, [{ type: 'thread' }]);
   assert.equal(entry._meta['openai/ui'].preferredModelDisplayMode, 'fullscreen');
   assert.deepEqual(entry._meta.ui.visibility, ['app']);
+  const opener = tools.find(tool => tool.name === 'open_task_plan_panel');
+  assert.equal(opener._meta['openai/ui'].preferredModelDisplayMode, 'inline', 'Automatic rendering stays in the conversation');
+  assert.equal(opener._meta['openai/ui'].entrypoints, undefined, 'Manual tab entrypoint stays separate');
   assert.ok(!tools.find(tool => tool.name === 'ensure_task_plan_panel')._meta?.ui?.resourceUri,
     'Presence check must never attach a UI resource');
   assert.deepEqual(tools.find(tool => tool.name === 'get_chat_task_plan')._meta.ui.visibility, ['app']);
@@ -144,5 +147,5 @@ try {
   assert.ok(!resource.contents[0].text.includes('/*__WORK_CATEGORY_ICONS__*/'));
   console.log(JSON.stringify({ passed: true, fixture, checks: ['host-derived chat isolation', 'unknown and conflicting chat identities', 'external writer visibility',
     'linked subplans', 'latest-plan selection and expiry', 'legacy ownership and restart persistence', 'chat-scoped receipts',
-    'active and concurrent opener reuse', 'instance ownership and release', 'no companion or repeated inline cards'] }, null, 2));
+    'active and concurrent opener reuse', 'instance ownership and release', 'inline by default, tab on click', 'no companion or repeated inline cards'] }, null, 2));
 } finally { await Promise.allSettled([client.close(), writer.close()]); }

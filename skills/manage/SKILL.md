@@ -1,6 +1,6 @@
 ---
 name: manage
-description: Create and maintain a live plan in the current chat's Task Plan panel plus a matching static Codex goal for substantial multi-step work. Do not create plans for short questions or simple one-step edits.
+description: Create and maintain a live plan inline in the current chat, with a separate tab on user click and a matching static Codex goal for substantial multi-step work. Do not create plans for short questions or simple one-step edits.
 ---
 
 # Manage
@@ -17,7 +17,7 @@ Only the main agent uses this plugin. If you are a delegated subagent, do not ca
    ```
 
 5. If an unfinished goal already exists, do not replace it or reset its accounting. Keep that goal and create only the task plan.
-6. Call `ensure_task_plan_panel` after establishing the goal binding. This check never renders UI. If it returns `should_open: false`, keep the existing active/opening panel and do not call a renderer. Only when it returns `should_open: true`, call `open_task_plan_panel` once with its returned `open_token`. Never call the rendering tool without that fresh permission from the check. If the client does not open a missing panel automatically, tell the user to choose **План этого чата** from the chat's panel menu. Do not repeatedly open it on updates.
+6. Call `ensure_task_plan_panel` after establishing the goal binding. This check never renders UI. If it returns `should_open: false`, keep the existing active/opening view and do not call a renderer. Only when it returns `should_open: true`, call `open_task_plan_panel` once with its returned `open_token` to show the live plan inline in the conversation. A separate tab opens only when the user clicks the card's expansion control or chooses **План этого чата** from the chat's panel menu. Never open a tab automatically or ask the user to open one just to show a new plan. Never call the rendering tool without fresh permission from the check. Do not repeatedly render the plan on updates.
 
    After preparing the plan and before executing its steps, assess which parts can run in parallel without violating dependencies or the required sequence. Delegate ready, bounded, independent work to subagents when its volume and expected time savings justify the cost of startup, coordination, and integration. Give each subagent a clear deliverable, required inputs, and non-overlapping write ownership; keep useful independent work for the main agent. Do not start work whose prerequisites are unfinished, duplicate the same assignment, or delegate tiny tasks merely to create parallelism. Reflect real concurrent branches in the plan and record their assigned agents. The main agent integrates and checks their results before dependent steps begin. If no worthwhile parallel work exists, proceed sequentially. Reassess when the active plan changes or dependencies become ready; use only available and permitted subagent tools, within the user's scope.
 
@@ -36,7 +36,7 @@ Do not create a plan merely to answer a question, inspect one file, or perform a
 
 ## Panel preference
 
-The installed plugin uses the native conversation panel, not the separate companion window. Do not launch the companion or change focus/Space behavior to show the plan. The panel determines its chat from Codex metadata. When that metadata is unavailable it stays empty, rather than showing a plan from another chat.
+The installed plugin shows the live plan inline in the conversation by default. The same view can expand to a native tab only on user click. Do not launch the separate companion window, automatically expand the view, or change focus/Space behavior to show the plan. The view determines its chat from Codex metadata. When that metadata is unavailable it stays empty, rather than showing a plan from another chat.
 
 ## Agent work categories
 
