@@ -20,8 +20,7 @@ const client = new Client({ name: "goal-smoke", version: "1.0.0" });
 const transport = new StdioClientTransport({
   command: process.execPath, args: [join(root, "server.mjs")],
   env: { ...process.env, CODEX_HOME: fixture, CODEX_SQLITE_HOME: fixture,
-    TASK_PLAN_DB: join(fixture, 'plans.sqlite'), TASK_PLAN_COMPANION_SOCKET: '',
-    TASK_PLAN_COMPANION_AUTOSTART: '0' }, cwd: root,
+    TASK_PLAN_DB: join(fixture, 'plans.sqlite') }, cwd: root,
 });
 const call = async (name, args) => {
   const result = await callWithSnapshot(client, { name, arguments: args });
@@ -52,7 +51,6 @@ try {
   assert.equal((await get()).goal.status, "active");
   assert.equal((await call("get_task_plan", {plan_id})).next_action, null);
   await call("update_task_plan_step", {plan_id, step_id: "step-1", status: "in_progress", progress: 42});
-  await call("show_task_plan", {plan_id});
   const baseline = await get();
   for (const status of ["paused", "active", "blocked", "usage_limited", "budget_limited", "complete"]) {
     db.prepare("UPDATE thread_goals SET status=? WHERE thread_id=?").run(status, thread);
@@ -62,8 +60,6 @@ try {
     assert.equal(plan.revision, baseline.revision);
     assert.equal(plan.status, "active", "Goal completion must not fabricate step completion");
   }
-  const score = await call("record_task_plan_output", {plan_id, points: 3});
-  assert.equal(score.progress_changed, false);
   db.prepare("UPDATE thread_goals SET objective='Edited objective' WHERE thread_id=?").run(thread);
   assert.equal((await get()).goal.state, "linked");
   db.prepare("UPDATE thread_goals SET goal_id='replacement', objective='Goal fixture' WHERE thread_id=?").run(thread);

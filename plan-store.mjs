@@ -2,8 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { createHash, randomUUID } from 'node:crypto';
-import { companionPlan, companionDelivery, launchCompanionForCreation } from './companion-bridge.mjs';
+import { randomUUID } from 'node:crypto';
 
 // Outside the versioned plugin cache. Each MCP process shares this database.
 export function openPlanStore() {
@@ -19,56 +18,63 @@ export function openPlanStore() {
   db.prepare('INSERT OR IGNORE INTO store_meta(key,value) VALUES(?,?)').run('revision', '0');
   const generation = db.prepare('SELECT value FROM store_meta WHERE key=?').get('generation').value;
   const upsert = db.prepare('INSERT INTO plans(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data');
-  const socket = process.env.TASK_PLAN_PRESENTATION === 'panel' ? null : process.env.TASK_PLAN_COMPANION_SOCKET;
-  const source = 'dbv2:' + createHash('sha256').update(path).update('\0').update(generation).digest('hex').slice(0, 32);
-  if (socket) db.exec('CREATE TABLE IF NOT EXISTS companion_outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, plan_id TEXT UNIQUE NOT NULL, data TEXT NOT NULL, created INTEGER NOT NULL)');
-  const delivery = socket ? companionDelivery(db, socket) : null;
-  delivery?.kick();
+  // Retire only an empty legacy outbox. Leave any undelivered data recoverable.
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='companion_outbox'").get()
+        && !db.prepare('SELECT 1 FROM companion_outbox LIMIT 1').get()) {
+      db.exec('DROP TABLE companion_outbox');
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
   let queue = Promise.resolve();
   db.exec('CREATE TABLE IF NOT EXISTS panel_receipts (thread_id TEXT NOT NULL, instance_id TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(thread_id, instance_id))');
   db.exec('CREATE TABLE IF NOT EXISTS panel_presence (thread_id TEXT PRIMARY KEY, instance_id TEXT, seen_at INTEGER NOT NULL DEFAULT 0, opening_until INTEGER NOT NULL DEFAULT 0)');
-  const panelMode = process.env.TASK_PLAN_PRESENTATION === 'panel';
   const pruneCompleted = () => {
     const roots = db.prepare(`SELECT id,data FROM plans
       WHERE json_extract(data,'$.parentPlanId') IS NULL
-        AND json_extract(data,'$.status') = 'completed'
+        AND json_extract(data,'$.status') IN ('completed','cancelled')
         AND julianday(json_extract(data,'$.completedAt')) <= julianday('now', '-30 seconds')
-        AND (json_extract(data,'$.publishedInChat') = 1
+        AND (json_extract(data,'$.archiveRendered') = 1
+          OR json_extract(data,'$.status') = 'cancelled'
+          OR coalesce(json_extract(data,'$.threadId'),json_extract(data,'$.goalLink.threadId')) IS NULL
           OR julianday(json_extract(data,'$.completedAt')) <= julianday('now', '-1 day'))`).all();
     for (const row of roots) {
       const plan = JSON.parse(row.data);
       const thread = (plan.threadId ?? plan.goalLink?.threadId)?.toLowerCase();
-      if (!thread) continue;
-      // Keep only the ordering boundary so an older root cannot reappear.
-      const key = 'panel_retired_before:' + thread;
-      const boundary = { at: plan.createdAt, sequence: plan.createdSequence ?? 0, id: plan.id };
-      const prior = db.prepare('SELECT value FROM store_meta WHERE key=?').get(key);
-      const previous = prior && JSON.parse(prior.value);
-      if (!previous || boundary.at > previous.at || (boundary.at === previous.at
-          && (boundary.sequence > previous.sequence || (boundary.sequence === previous.sequence && boundary.id > previous.id)))) {
-        db.prepare('INSERT INTO store_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
-          .run(key, JSON.stringify(boundary));
+      if (thread) {
+        // Keep only the ordering boundary so an older root cannot reappear.
+        const key = 'panel_retired_before:' + thread;
+        const boundary = { at: plan.createdAt, sequence: plan.createdSequence ?? 0, id: plan.id };
+        const prior = db.prepare('SELECT value FROM store_meta WHERE key=?').get(key);
+        const previous = prior && JSON.parse(prior.value);
+        if (!previous || boundary.at > previous.at || (boundary.at === previous.at
+            && (boundary.sequence > previous.sequence || (boundary.sequence === previous.sequence && boundary.id > previous.id)))) {
+          db.prepare('INSERT INTO store_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+            .run(key, JSON.stringify(boundary));
+        }
       }
       db.prepare(`WITH RECURSIVE retired(id) AS (
         SELECT ? UNION SELECT p.id FROM plans p JOIN retired r ON json_extract(p.data,'$.parentPlanId')=r.id
       ) DELETE FROM plans WHERE id IN retired`).run(row.id);
-      db.prepare(`DELETE FROM panel_receipts WHERE thread_id=? AND EXISTS (
+      if (thread) db.prepare(`DELETE FROM panel_receipts WHERE thread_id=? AND EXISTS (
         SELECT 1 FROM json_each(panel_receipts.data,'$.history') h WHERE json_extract(h.value,'$.plan_id')=?
       )`).run(thread, row.id);
     }
     return roots.length > 0;
   };
-  if (panelMode) {
-    setInterval(() => {
+  setInterval(() => {
+    try {
+      db.exec('BEGIN IMMEDIATE');
       try {
-        db.exec('BEGIN IMMEDIATE');
-        try {
-          if (pruneCompleted()) db.exec("UPDATE store_meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'");
-          db.exec('COMMIT');
-        } catch (error) { db.exec('ROLLBACK'); throw error; }
-      } catch (error) { console.error('Task Plan cleanup failed:', error.message); }
-    }, 30_000).unref();
-  }
+        if (pruneCompleted()) db.exec("UPDATE store_meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'");
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+    } catch (error) { console.error('Task Plan cleanup failed:', error.message); }
+  }, 30_000).unref();
   const presence = threadId => {
     const row = db.prepare('SELECT instance_id,seen_at,opening_until FROM panel_presence WHERE thread_id=?').get(threadId);
     const now = Date.now();
@@ -83,7 +89,7 @@ export function openPlanStore() {
   return {
     panelPresence: chatPresence,
     claimPanelOpen(threadId) {
-      const current = chatPresence(threadId);
+      const current = presence(threadId);
       if (current.active || current.opening) return { ...current, should_open: false };
       db.prepare('INSERT INTO panel_presence(thread_id,instance_id,seen_at,opening_until) VALUES(?,NULL,0,?) ON CONFLICT(thread_id) DO UPDATE SET instance_id=NULL,seen_at=0,opening_until=excluded.opening_until')
         .run(threadId, Date.now() + 15000);
@@ -104,7 +110,7 @@ export function openPlanStore() {
       if (current.active && current.instance_id !== instanceId) return false;
       db.prepare('INSERT INTO panel_presence(thread_id,instance_id,seen_at,opening_until) VALUES(?,?,?,0) ON CONFLICT(thread_id) DO UPDATE SET instance_id=excluded.instance_id,seen_at=excluded.seen_at,opening_until=0')
         .run(key, instanceId, Date.now());
-      db.prepare('DELETE FROM store_meta WHERE key=?').run('panel_open:' + threadId);
+      if (!tab) db.prepare('DELETE FROM store_meta WHERE key=?').run('panel_open:' + threadId);
       return true;
     },
     releasePanel(threadId, instanceId) {
@@ -128,11 +134,11 @@ export function openPlanStore() {
     panelReceipts(threadId) {
       return db.prepare('SELECT data FROM panel_receipts WHERE thread_id=? ORDER BY updated_at DESC LIMIT 10').all(threadId).map(row => JSON.parse(row.data));
     },
-    run(plans, action, showPlanId = null, { stampSnapshot = false, ...options } = {}) {
+    run(plans, action, { stampSnapshot = false, ...options } = {}) {
       const operation = queue.then(async () => {
         db.exec('BEGIN IMMEDIATE');
         try {
-          const pruned = panelMode && pruneCompleted();
+          const pruned = pruneCompleted();
           plans.clear();
           const before = new Map();
           const rows = Object.hasOwn(options, 'scopeThreadId')
@@ -153,25 +159,10 @@ export function openPlanStore() {
             plans.set(row.id, plan); before.set(row.id, row.data);
           }
           const result = await action();
-          let createdRoot = false;
           let changed = pruned;
           for (const [id, plan] of plans) {
             const data = JSON.stringify(plan);
             if (before.get(id) !== data) { upsert.run(id, data); changed = true; }
-            if (socket) {
-              const projected = companionPlan(plan);
-              const prior = before.has(id) ? companionPlan(JSON.parse(before.get(id))) : null;
-              if (projected && !prior) createdRoot = true;
-              if (projected && (JSON.stringify(projected) !== JSON.stringify(prior) || id === showPlanId)) {
-                const pending = db.prepare('SELECT created,data FROM companion_outbox WHERE plan_id=?').get(id);
-                db.prepare('DELETE FROM companion_outbox WHERE plan_id=?').run(id);
-                const inserted = db.prepare('INSERT INTO companion_outbox(plan_id,data,created) VALUES(?,?,?)')
-                  .run(id, JSON.stringify(projected), pending?.created || (!prior ? 1 : 0));
-                projected.source = source;
-                projected.creationSequence = pending ? JSON.parse(pending.data).creationSequence : (!prior ? Number(inserted.lastInsertRowid) : 0);
-                db.prepare('UPDATE companion_outbox SET data=? WHERE seq=?').run(JSON.stringify(projected), inserted.lastInsertRowid);
-              }
-            }
           }
           let revision = Number(db.prepare('SELECT value FROM store_meta WHERE key=?').get('revision').value);
           if (changed) {
@@ -180,10 +171,6 @@ export function openPlanStore() {
           }
           if (stampSnapshot) result.structuredContent.storeVersion = { generation, revision };
           db.exec('COMMIT');
-          // One launch attempt only for a newly COMMITTED root, never a replay/read/update.
-          if (socket && createdRoot) void launchCompanionForCreation(socket);
-          // Never hold the transaction or delay the agent on a UI connection.
-          delivery?.kick();
           return result;
         } catch (error) {
           db.exec('ROLLBACK'); plans.clear(); throw error;

@@ -10,8 +10,7 @@ const transport = new StdioClientTransport({
   command: process.execPath,
   args: [join(root, "server.mjs")],
   cwd: root,
-  env: { ...process.env, TASK_PLAN_DB: ':memory:',
-    TASK_PLAN_COMPANION_SOCKET: '', TASK_PLAN_COMPANION_AUTOSTART: '0' },
+  env: { ...process.env, TASK_PLAN_DB: ':memory:' },
 });
 const client = new Client(
   { name: "codex-task-plan-smoke", version: "0.1.0" },
@@ -33,10 +32,7 @@ try {
     "create_task_plan",
     "revise_task_plan",
     "update_task_plan_step",
-    "record_task_plan_output",
     "get_task_plan",
-    "show_task_plan",
-    "set_companion_focus_mode",
     "cancel_task_plan",
   ]) {
     if (!names.has(name)) throw new Error(`Missing tool: ${name}`);
@@ -49,28 +45,7 @@ try {
   const planId = created.structuredContent?.plan_id;
   if (!planId) throw new Error("create_task_plan did not return plan_id");
 
-  const shown = await callWithSnapshot(client, {
-    name: "show_task_plan",
-    arguments: { plan_id: planId, view: "chip" },
-  });
-  if (shown.structuredContent?.view !== "chip") throw new Error("Chip view missing");
-  if (shown.structuredContent?.shown_revision !== 1) throw new Error("Initial shown revision missing");
-
-  let scored = await callWithSnapshot(client, {
-    name: "record_task_plan_output",
-    arguments: { plan_id: planId, points: 3 },
-  });
-  if (scored.structuredContent?.score !== 3 || scored.structuredContent?.should_show !== false) {
-    throw new Error("Three points unexpectedly triggered a re-anchor");
-  }
-  scored = await callWithSnapshot(client, {
-    name: "record_task_plan_output",
-    arguments: { plan_id: planId, points: 1 },
-  });
-  if (scored.structuredContent?.score !== 4 || scored.structuredContent?.progress_changed !== false || scored.structuredContent?.should_show !== false) {
-    throw new Error("Unchanged progress unexpectedly triggered a re-anchor");
-  }
-  const showTool = listed.tools.find((tool) => tool.name === "show_task_plan");
+  const showTool = listed.tools.find(tool => tool.name === "open_task_plan_panel");
   const updateTool = listed.tools.find((tool) => tool.name === "update_task_plan_step");
   if (!updateTool?.inputSchema?.properties?.parallel_activity) {
     throw new Error("parallel_activity is missing from the step update schema");
@@ -80,17 +55,8 @@ try {
   const resource = await client.readResource({ uri });
   const html = resource.contents[0];
   if (html?.mimeType !== "text/html;profile=mcp-app") throw new Error("Unexpected UI MIME type");
-  for (const marker of ["get_task_plan", "progress", "`${textWidth}px`", "alignProgressBars", "previousProgress", "progress-glint", "targetProgress", "cubic-bezier(.22, .8, .3, 1)", "item.agents", "data-tooltip", "agent.dataset.tooltip", "Готово", "waiting_for_user", "Нужен ответ", "async function bootstrap", "await fetchLatestPlan()", "plan.revision < lastRevision", "shell.classList.add(\"ready\")"]) {
-    if (!html.text?.includes(marker)) throw new Error(`Widget marker missing: ${marker}`);
-  }
-  for (const marker of ["requestClose", "closeTimer", "setTimeout", "aria-expanded", "id=\"toggle\"", "chevron", "status.title", "agent.title", ".step.in_progress { background", ".step.blocked { background", "Math.min(280", "if (initialPlan) render(initialPlan);\n      planId"] ) {
-    if (html.text?.includes(marker)) throw new Error(`Widget contains a forbidden UI marker: ${marker}`);
-  }
-  if (!html.text?.includes("grid-template-columns: 18px minmax(0, 1fr) auto")) {
-    throw new Error("Header is not aligned to the step grid");
-  }
-  if (html.text?.indexOf('if (item.status === "in_progress")') > html.text?.indexOf("if (item.note)")) {
-    throw new Error("Progress bar must render before the step note");
+  for (const marker of ["get_chat_task_plan", "waiting_for_user", "prefers-reduced-motion"]) {
+    if (!html.text?.includes(marker)) throw new Error(`Panel marker missing: ${marker}`);
   }
 
   const skill = await readFile(join(root, "skills/manage/SKILL.md"), "utf8");
@@ -113,21 +79,6 @@ try {
   });
   const firstStep = firstRunning.structuredContent?.plan?.steps?.[0];
   if (firstStep?.agents?.length !== 2) throw new Error("Subagent assignment was not retained");
-
-  scored = await callWithSnapshot(client, {
-    name: "record_task_plan_output",
-    arguments: { plan_id: planId, points: 1 },
-  });
-  if (scored.structuredContent?.score !== 4 || scored.structuredContent?.progress_changed !== true || scored.structuredContent?.should_show !== true) {
-    throw new Error("Changed progress at the score threshold did not trigger a re-anchor");
-  }
-  const reanchored = await callWithSnapshot(client, {
-    name: "show_task_plan",
-    arguments: { plan_id: planId, view: "full" },
-  });
-  if (reanchored.structuredContent?.reanchor_score !== 0 || reanchored.structuredContent?.shown_revision !== 2) {
-    throw new Error("Re-anchor did not reset its score or capture the shown revision");
-  }
 
   const parallel = await callWithSnapshot(client, {
     name: "update_task_plan_step",

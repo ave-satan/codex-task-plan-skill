@@ -21,6 +21,7 @@ let panelAckInFlight = false;
 let panelReleaseInFlight = null;
 let panelHasShownPlan = false;
 let panelCloseRequested = false;
+let panelArchiveAck = null;
 const panelIsInline = () => panelApp?.getHostContext()?.displayMode === 'inline';
 
 document.documentElement.dataset.panelInstance = panelInstanceId;
@@ -116,6 +117,11 @@ const panelAccept = (envelope, source, sequence = 0) => {
       || !Number.isSafeInteger(envelope.plan.revision) || envelope.plan.revision < 0
       || !Array.isArray(envelope.plan.steps))) {
     panelClear('Не удалось обновить план', thread);
+    return;
+  }
+  if (source === 'read' && !panelIsInline() && panelLatest?.plan
+      && panelLatest.plan.id !== envelope.plan?.id) {
+    void panelRequestClose();
     return;
   }
   if (source === 'read' && !envelope.plan && panelIsInline()) {
@@ -217,6 +223,14 @@ window.taskPlanPanel = {
     const plan = panelLatest.plan;
     if (plan && (value.plan_id !== plan.id || value.revision !== plan.revision)) return;
     if (!plan && (value.plan_id != null || value.revision != null)) return;
+    if (panelArchive) {
+      if (plan) panelArchiveAck ??= panelApp.callServerTool({
+        name: 'ack_completed_task_plan', arguments: { plan_id: plan.id },
+      }, { timeout: 8000 }).then(result => {
+        if (result.isError) panelArchiveAck = null;
+      }).catch(() => { panelArchiveAck = null; });
+      return;
+    }
     const acknowledgement = { instance_id: panelInstanceId, counter: String(value.counter ?? '').slice(0, 40) };
     if (plan) {
       acknowledgement.plan_id = plan.id;

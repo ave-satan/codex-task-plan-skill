@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -10,8 +10,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const expected = ["research", "architecture", "design", "implementation", "diagnostics",
   "testing", "review", "data", "documentation", "operations"];
 const transport = new StdioClientTransport({ command: process.execPath,
-  args: [join(root, "server.mjs")], cwd: root, env: { ...process.env, TASK_PLAN_DB: ':memory:',
-    TASK_PLAN_COMPANION_SOCKET: '', TASK_PLAN_COMPANION_AUTOSTART: '0' } });
+  args: [join(root, "server.mjs")], cwd: root, env: { ...process.env, TASK_PLAN_DB: ':memory:' } });
 const client = new Client({ name: "icons-smoke", version: "1.0.0" }, { capabilities: {} });
 await client.connect(transport);
 const call = async (name, args) => {
@@ -49,7 +48,6 @@ try {
   assert.deepEqual(legacy.steps[0].agents, [{ name: "legacy" }]);
   plan = await call("update_task_plan_step", { plan_id: plan.id, step_id: "step-1",
     status: "in_progress", agents: [{ name: "researcher", category: "research" }] });
-  const fixturePlan = structuredClone(plan);
   const completed = await call("update_task_plan_step", { plan_id: plan.id,
     step_id: "step-1", status: "completed" });
   assert.deepEqual(completed.steps[0].agents, [{ name: "researcher", category: "research", status: "completed" }]);
@@ -76,36 +74,10 @@ try {
   assert.equal(parent.steps[1].agents[0].category, "architecture");
   assert.equal(parent.steps[1].childPlans[0].id, child.id);
 
-  const uri = tools.find(t => t.name === "show_task_plan")._meta.ui.resourceUri;
+  const uri = tools.find(t => t.name === "open_task_plan_panel")._meta.ui.resourceUri;
   const resource = await client.readResource({ uri });
   assert.equal(resource.contents[0]._meta?.["openai/widgetMinFrameHeight"], 0);
   const html = resource.contents[0].text;
-  assert.ok(html.includes('class="status-gear"'));
-  assert.ok(html.includes('waiting_for_user: { icon: "?", text: "Нужен ответ" }'));
-  assert.ok(html.includes('.waiting_for_user .status { color: var(--question); animation: question-breathe 2.8s ease-in-out infinite;'));
-  assert.ok(html.includes('.step-head .progress { grid-row: 2; }'));
-  assert.ok(html.includes('.goal-stopped .status-gear { animation-play-state: paused; }'));
-  assert.ok(!html.includes('.in_progress .agent { animation:'));
-  assert.ok(!html.includes('.in_progress .agent-gear { animation:'));
-  for (const category of expected) {
-    assert.ok(html.includes(`--agent-motion: agent-${category};`), `motion mapping: ${category}`);
-    assert.ok(html.includes(`@keyframes agent-${category} {`), `motion frames: ${category}`);
-  }
-  assert.ok(html.includes('.in_progress .agent > img {'));
-  assert.ok(html.includes('.goal-stopped .in_progress .agent > img { animation-play-state: paused; }'));
-  assert.ok(html.includes('.in_progress .agent:hover > img, .in_progress .agent:focus-visible > img,'));
-  assert.ok(html.includes('prefers-reduced-motion: reduce'));
-  assert.ok(html.includes('agent-breathe 2.5s ease-in-out infinite'));
-  assert.ok(html.includes('@keyframes agent-breathe { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }'));
-  assert.ok(!html.includes('@keyframes agent-pulse'));
-  assert.ok(html.includes('agent.style.setProperty("--agent-phase"'));
-  assert.ok(html.includes('.in_progress .agent[data-status="completed"] > img { animation: none; opacity: 1; transform: none; }'));
-  assert.ok(html.includes('icon.width = 24;'));
-  assert.ok(html.includes('`${categoryIcon?.label ?? "Субагент"} · ${displayName}`'));
-  const header = html.match(/class="plan-icon"[^>]*><img src="data:image\/png;base64,([^"]+)"/);
-  assert.ok(header, "Header embeds the duck PNG");
-  assert.deepEqual(Buffer.from(header[1], "base64"), await readFile(join(root, "assets/duck-foreman.png")));
-  assert.ok(!html.includes("__PLAN_HEADER_ICON__"));
   assert.ok(!html.includes("/*__WORK_CATEGORY_ICONS__*/"));
   const icons = JSON.parse(html.match(/const categoryIcons = (.+);/)[1]);
   assert.deepEqual(Object.keys(icons), expected);
@@ -116,23 +88,6 @@ try {
     assert.equal(bytes.readUInt32BE(16), 48);
     assert.equal(bytes.readUInt32BE(20), 48);
     assert.equal(bytes[25], 6, "RGBA color type expected");
-  }
-  if (process.argv[2]) {
-    fixturePlan.goal = { state: "linked", availability: "available", status: "active" };
-    const state = JSON.stringify(fixturePlan).replaceAll("<", "\\u003c");
-    const fixture = `<script>
-      let fixturePlan = ${state};
-      window.openai = { toolOutput: { plan: fixturePlan },
-        callTool: async () => ({ plan: fixturePlan }), notifyIntrinsicHeight: () => {} };
-      function publish() { window.dispatchEvent(new CustomEvent('openai:set_globals',
-        {detail:{globals:{toolOutput:{plan:fixturePlan}}}})); }
-      function setGoal(status) { fixturePlan.goal.status=status; publish(); }
-      function reclassify() { fixturePlan.steps[0].agents[0].category='review'; fixturePlan.revision++; publish(); }
-      function legacyAgent() { delete fixturePlan.steps[0].agents[0].category; fixturePlan.revision++; publish(); }
-      function longStep() { fixturePlan.steps[0].title='Проверить перенос длинного названия этапа без смещения иконки относительно текста и полосы прогресса'; fixturePlan.steps[0].agents=[{name:'researcher',category:'research'},{name:'reviewer',category:'review'},{name:'tester',category:'testing'}]; fixturePlan.revision++; publish(); }
-    </script><style>html{color-scheme:dark;background:#111}body{max-width:880px;margin:24px auto;padding:16px}nav{margin-bottom:20px;display:flex;gap:12px;flex-wrap:wrap}button{padding:6px 10px}</style>`;
-    const controls = `<nav><button onclick="setGoal('paused')">Пауза</button><button onclick="setGoal('active')">Продолжить</button><button onclick="reclassify()">Сменить категорию</button><button onclick="legacyAgent()">Без категории</button><button onclick="longStep()">Длинный шаг</button><button onclick="document.documentElement.style.colorScheme='light';document.documentElement.style.background='#fff'">Светлая тема</button></nav>`;
-    await writeFile(process.argv[2], html.replace("</head>", fixture + "</head>").replace("<body>", "<body>" + controls));
   }
   console.log("Icons smoke passed: 10 categories, retained state, validation, legacy, completion, subplan, 10 embedded RGBA assets.");
 } finally { await client.close(); }

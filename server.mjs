@@ -13,28 +13,27 @@ import { z } from "zod";
 import { readGoal, syncGoalLink } from "./goal-reader.mjs";
 import { workCategories, workCategoryIds } from "./work-categories.mjs";
 import { openPlanStore } from "./plan-store.mjs";
-import { sendCompanion } from "./companion-bridge.mjs";
 import { hostThreadId, planThreadId, latestChatPlan, planEmoji } from "./chat-panel.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const categoryIcons = Object.fromEntries(await Promise.all(workCategories.map(async ({ id, label }) => [
   id, { label, src: `data:image/png;base64,${(await readFile(join(root, "assets", "agent-icons", `${id}.png`))).toString("base64")}` },
 ])));
-const widgetHtml = (await readFile(join(root, "widget.html"), "utf8"))
-  .replace("__PLAN_HEADER_ICON__", `data:image/png;base64,${(await readFile(join(root, "assets", "duck-foreman.png"))).toString("base64")}`)
-  .replace("/*__WORK_CATEGORY_ICONS__*/ {}", JSON.stringify(categoryIcons).replaceAll("<", "\\u003c"));
-const widgetUri = "ui://codex-task-plan/plan.html";
-const panelUri = "ui://codex-task-plan/chat-panel-v8.html";
+const panelUri = "ui://codex-task-plan/chat-panel-v9.html";
 const archiveUri = "ui://codex-task-plan/completed.html";
 const plans = new Map();
 const store = openPlanStore();
-const panelMode = process.env.TASK_PLAN_PRESENTATION === 'panel';
-const companionSocket = panelMode ? null : process.env.TASK_PLAN_COMPANION_SOCKET;
-const companionMode = Boolean(companionSocket);
 function registerAppTool(server, name, config, handler) {
   return registerTool(server, name, config, (...args) => store.run(plans, () => {
     if (["update_task_plan_step", "revise_task_plan", "cancel_task_plan"].includes(name)) {
       let plan = requirePlan(args[0].plan_id);
+      const extra = args[1];
+      const thread = hostThreadId(extra);
+      const owner = planThreadId(plan, plans);
+      if ((!thread && (extra?._meta?.thread_id !== undefined || extra?._meta?.threadId !== undefined))
+          || (thread && owner && thread !== owner)) {
+        throw new Error('Cannot change a plan belonging to another chat.');
+      }
       while (plan) {
         if (plan.status === "completed") {
           throw new Error("Completed task plans are read-only. Create a new plan for new work; do not reuse or reopen a completed plan.");
@@ -46,13 +45,12 @@ function registerAppTool(server, name, config, handler) {
       }
     }
     return handler(...args);
-  }, name === 'show_task_plan' ? args[0].plan_id : null, {
+  }, {
     stampSnapshot: ['open_task_plan_panel', 'render_task_plan_panel', 'get_chat_task_plan'].includes(name),
     ...(['ensure_task_plan_panel', 'open_task_plan_panel', 'render_task_plan_panel', 'get_chat_task_plan', 'release_task_plan_panel', 'ack_task_plan_panel', 'get_task_plan_panel_status'].includes(name)
       ? { scopeThreadId: hostThreadId(args[1]) } : {}),
   }));
 }
-const reanchorThreshold = 4;
 
 const statuses = ["pending", "in_progress", "waiting_for_user", "completed", "blocked", "skipped"];
 const agentSchema = z.object({
@@ -231,8 +229,7 @@ const server = new McpServer(
   {
     instructions: "Only the main agent manages this plugin. Delegated subagents must not call any task-plan tools; they report results to the main agent. Keep completed agent icons with status=completed; only working agents count as parallel work. " +
       "Create one plan only for substantial decomposed work. Build ordinary main-agent steps as a real sequential execution path. Keep its returned plan_id with the task context and accept a known plan_id from another conversation when explicitly requested. Revise the existing plan when scope changes instead of replacing it. Only one ordinary main-agent step may be in progress; additional concurrent steps require assigned agents, linked subplans, or a concise parallel_activity describing real background work. Attach the names of currently working subagents to their steps. " +
-      (panelMode ? "Call ensure_task_plan_panel after goal binding. Only if should_open=true, call open_task_plan_panel with the returned open_token to show the live plan inline in the conversation. Opening a separate tab is a user action, never automatic. When active/opening, keep the existing view; do not call any rendering tool. The view refreshes itself. Immediately after completing the root plan, call publish_completed_task_plan once to save its final card in the conversation. Do not call record_task_plan_output/show_task_plan for ordinary updates. Never show another chat's plan as a fallback."
-        : "Render once after creation. Score user-visible progress responses with record_task_plan_output; render another copy only when should_show=true."),
+      "Call ensure_task_plan_panel after goal binding. If it returns should_open=true, use its token to show the plan inline. Tabs open only on user action. Immediately after completing the root, call publish_completed_task_plan once. Never show another chat's plan as a fallback.",
   },
 );
 
@@ -296,8 +293,6 @@ registerAppTool(
       createdSequence: store.nextPlanSequence(),
       updatedAt: now,
       completedAt: null,
-      reanchorScore: 0,
-      lastShownRevision: null,
       parentPlanId: parentPlanId ?? null,
       parentStepId: parentStepId ?? null,
       threadId: threadId ?? null,
@@ -427,57 +422,6 @@ registerAppTool(
 
 registerAppTool(
   server,
-  "record_task_plan_output",
-  {
-    title: "Score task plan distance",
-    description: panelMode ? "Legacy compatibility tool. Not needed for the live chat panel; it never requests another card in panel mode."
-      : "Record the visual weight of exactly one upcoming user-visible progress response: 1 point for short, 2 for medium, or 3 for long. Call once immediately before that response. Returns should_show=true only after at least 4 accumulated points and when the plan changed since its previous render.",
-    inputSchema: {
-      plan_id: z.string().uuid(),
-      points: z.number().int().min(1).max(3),
-    },
-    annotations: {
-      readOnlyHint: false,
-      openWorldHint: false,
-      destructiveHint: false,
-      idempotentHint: false,
-    },
-    _meta: {
-      ui: { visibility: ["model"] },
-      "openai/visibility": "private",
-      "openai/toolInvocation/invoking": "Scoring plan distance…",
-      "openai/toolInvocation/invoked": "Plan distance scored",
-    },
-  },
-  async ({ plan_id: planId, points }) => {
-    const plan = requirePlan(planId);
-    plan.reanchorScore = Math.min(reanchorThreshold, plan.reanchorScore + points);
-    const progressChanged =
-      plan.lastShownRevision === null || plan.revision > plan.lastShownRevision;
-    const shouldShow = !panelMode && plan.reanchorScore >= reanchorThreshold && progressChanged;
-    return {
-      structuredContent: {
-        plan_id: plan.id,
-        points,
-        score: plan.reanchorScore,
-        threshold: reanchorThreshold,
-        progress_changed: progressChanged,
-        should_show: shouldShow,
-      },
-      content: [
-        {
-          type: "text",
-          text: shouldShow
-            ? "Re-anchor the task plan before this response."
-            : "Keep the existing task plan anchor.",
-        },
-      ],
-    };
-  },
-);
-
-registerAppTool(
-  server,
   "update_task_plan_step",
   {
     title: "Update task plan step",
@@ -598,43 +542,6 @@ registerAppTool(
   },
 );
 
-registerAppTool(
-  server,
-  "show_task_plan",
-  {
-    title: "Show task plan",
-    description: panelMode ? "Legacy compatibility read. Use open_task_plan_panel to open this chat's live plan; do not call this on ordinary updates."
-      : "Render the current always-open plan inline. Call after creation, when record_task_plan_output returns should_show=true, or when the user explicitly asks for another copy. Do not call it for any other normal update. The view field is retained for compatibility.",
-    inputSchema: {
-      plan_id: z.string().uuid(),
-      view: z.enum(["full", "chip"]).default("chip"),
-    },
-    annotations: {
-      readOnlyHint: true,
-      openWorldHint: false,
-      destructiveHint: false,
-      idempotentHint: true,
-    },
-    _meta: companionMode || panelMode ? {} : {
-      ui: { resourceUri: widgetUri, visibility: ["model", "app"] },
-      "openai/outputTemplate": widgetUri,
-      "openai/widgetAccessible": true,
-      "openai/toolInvocation/invoking": "Opening task plan…",
-      "openai/toolInvocation/invoked": "Task plan ready",
-    },
-  },
-  async ({ plan_id: planId, view }) => {
-    const plan = requirePlan(planId);
-    plan.lastShownRevision = plan.revision;
-    plan.reanchorScore = 0;
-    return resultFor(plan, panelMode ? `Task plan ${plan.id} is available in this chat's Task Plan panel.` : companionMode ? `Queued task plan ${plan.id} for the companion. Delivery is asynchronous; selection is unchanged.` : `Rendered task plan ${plan.id}.`, {
-      view,
-      reanchor_score: plan.reanchorScore,
-      shown_revision: plan.lastShownRevision,
-    });
-  },
-);
-
 function chatPanelResult(extra) {
   const threadId = hostThreadId(extra);
   const plan = latestChatPlan(plans, threadId);
@@ -715,7 +622,7 @@ registerAppTool(server, 'get_task_plan_panel_status', {
     receipts: threadId ? store.panelReceipts(threadId) : [] }, content: [] };
 });
 
-if (panelMode) registerAppTool(server, 'publish_completed_task_plan', {
+registerAppTool(server, 'publish_completed_task_plan', {
   title: 'Итог плана',
   description: 'Call once immediately after root completion to save a final card in the conversation, independently of live storage.',
   inputSchema: { plan_id: z.string().uuid() }, annotations: panelReadAnnotations,
@@ -727,11 +634,25 @@ if (panelMode) registerAppTool(server, 'publish_completed_task_plan', {
   if (!threadId || planThreadId(plan, plans) !== threadId || plan.parentPlanId || plan.status !== 'completed') {
     throw new Error('Only a completed root plan of this chat can be published.');
   }
-  plan.publishedInChat = true;
   return {
     structuredContent: { panel: true, thread_id: threadId, plan: { ...snapshot(plan), emoji: planEmoji(plan.id) } },
     content: [{ type: 'text', text: 'Итог плана сохранён в диалоге.' }],
   };
+});
+
+registerAppTool(server, 'ack_completed_task_plan', {
+  description: 'Confirm that Codex delivered and rendered a completed card.',
+  inputSchema: { plan_id: z.string().uuid() },
+  annotations: { ...panelReadAnnotations, readOnlyHint: false },
+  _meta: { ui: { visibility: ['app'] } },
+}, async ({ plan_id: id }, extra) => {
+  const thread = hostThreadId(extra);
+  const plan = plans.get(id);
+  if (!thread || (plan && (plan.parentPlanId || plan.status !== 'completed' || planThreadId(plan, plans) !== thread))) {
+    throw new Error('Invalid completed plan receipt.');
+  }
+  if (plan) plan.archiveRendered = true;
+  return { structuredContent: { acknowledged: true }, content: [] };
 });
 
 async function panelHtml(archive = false) {
@@ -756,37 +677,6 @@ registerAppResource(server, 'Task Plan — current chat', panelUri,
     text: await panelHtml(), _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] }, prefersBorder: false },
       'openai/ui': { availableDisplayModes: ['fullscreen', 'inline'] }, 'openai/widgetMinFrameHeight': 0 },
   }] }));
-
-registerAppTool(
-  server,
-  "set_companion_focus_mode",
-  {
-    title: "Keep companion expanded",
-    description:
-      "Compatibility control for the retired focus-collapse mode. The companion remains expanded on the Codex Space and uses a compact icon only on other Spaces.",
-    inputSchema: { enabled: z.boolean() },
-    annotations: {
-      readOnlyHint: false,
-      openWorldHint: false,
-      destructiveHint: false,
-      idempotentHint: true,
-    },
-    _meta: {
-      ui: { visibility: ["model"] },
-      "openai/visibility": "private",
-      "openai/toolInvocation/invoking": "Updating companion behavior…",
-      "openai/toolInvocation/invoked": "Companion behavior updated",
-    },
-  },
-  async ({ enabled }) => {
-    if (!companionSocket) throw new Error("Task Plan companion is not configured for this plugin process.");
-    const response = await sendCompanion(companionSocket, { action: "set_focus_collapse", enabled: false });
-    return {
-      structuredContent: { enabled: false, requested: enabled, state: response.state },
-      content: [{ type: "text", text: "Task Plan stays expanded on the Codex Space; compact mode is limited to other Spaces." }],
-    };
-  },
-);
 
 registerAppTool(
   server,
@@ -817,26 +707,4 @@ registerAppTool(
   },
 );
 
-registerAppResource(
-  server,
-  "Codex Task Plan",
-  widgetUri,
-  { description: "Compact always-open inline task plan with parallel work and subagent indicators." },
-  async () => ({
-    contents: [
-      {
-        uri: widgetUri,
-        mimeType: RESOURCE_MIME_TYPE,
-        text: widgetHtml,
-        // Codex defaults to a 200px frame floor; let the widget report its content height.
-        _meta: { "openai/widgetMinFrameHeight": 0 },
-      },
-    ],
-  }),
-);
-
-if (process.env.TASK_PLAN_NATIVE_EVENT_PROBE === '1') {
-  const { registerNativeEventProbe } = await import('./native-event-probe.mjs');
-  await registerNativeEventProbe(server);
-}
 await server.connect(new StdioServerTransport());

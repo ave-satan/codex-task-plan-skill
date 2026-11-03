@@ -5,9 +5,6 @@
       "args": ["/Users/Mr.Sergei/plugins/task-plan/server.mjs"],
       "cwd": "/Users/Mr.Sergei/plugins/task-plan",
       "enabled": true,
-      "env": {
-        "TASK_PLAN_PRESENTATION": "panel"
-      },
       "default_tools_approval_mode": "approve",
       "startup_timeout_sec": 10,
       "tool_timeout_sec": 30

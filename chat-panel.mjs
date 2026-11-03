@@ -30,7 +30,7 @@ export function latestChatPlan(plans, threadId, now = Date.now()) {
   return plan;
 }
 
-// Same pool and stable UUID mapping as the companion: existing plans keep their icon.
+// Keep the pool order stable so existing plans retain their icons.
 const emojiPool = [
   '🫠','🫨','🥴','🤪','🫥','🫣','🥸','👹','👺','👻','👽','👾','🤖','💩','😈','👿','☠️','💀','🤯','🤤',
   '🤓','🧐','🥶','🥵','🤢','🤮','🤧','🤬','😵‍💫','😵','😶‍🌫️','😬','🙃','🤐','🫤',

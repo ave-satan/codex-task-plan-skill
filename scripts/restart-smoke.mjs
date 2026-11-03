@@ -15,8 +15,7 @@ const thread='00000000-0000-4000-8000-000000000009';
 async function connect() {
   const client = new Client({name:'restart-smoke',version:'1'});
   const transport = new StdioClientTransport({command:process.execPath,args:[join(root,'server.mjs')],cwd:root,
-    env:{...process.env,CODEX_HOME:fixture,CODEX_SQLITE_HOME:fixture,TASK_PLAN_DB:join(fixture,'plans.sqlite'),
-      TASK_PLAN_COMPANION_SOCKET:'',TASK_PLAN_COMPANION_AUTOSTART:'0'}});
+    env:{...process.env,CODEX_HOME:fixture,CODEX_SQLITE_HOME:fixture,TASK_PLAN_DB:join(fixture,'plans.sqlite')}});
   await client.connect(transport); clients.push(client); return {client,transport};
 }
 async function call(client,name,args) {
@@ -28,7 +27,6 @@ try {
   const created=await call(a.client,'create_task_plan',{title:'Persistence fixture',thread_id:thread,steps:Array.from({length:12},(_,i)=>`Step ${i+1}: verify persistent state without losing work`)});
   const id=created.structuredContent.plan_id;
   assert.ok(created.structuredContent.next_action);
-  await call(a.client,'show_task_plan',{plan_id:id});
   const args={plan_id:id,step_id:'step-1',status:'in_progress',progress:42,note:'Saved checkpoint',agents:[{name:'tester',category:'testing'}]};
   const update=await call(a.client,'update_task_plan_step',args);
   assert.equal(update.structuredContent.plan,undefined);
@@ -39,7 +37,6 @@ try {
   const oldBytes=JSON.stringify({structuredContent:{plan:before,next_action:null},content:update.content}).length;
   const newBytes=JSON.stringify(update).length;
   assert.ok(newBytes<oldBytes*.5,`${newBytes} vs ${oldBytes}`);
-  await call(a.client,'record_task_plan_output',{plan_id:id,points:3});
   // Abrupt exit: durable acknowledgement must not depend on graceful shutdown.
   process.kill(a.transport.pid,'SIGKILL');
   await a.client.close();
@@ -49,7 +46,6 @@ try {
   assert.deepEqual(recovered.plan,before);
   assert.equal(recovered.plan.goal.state,'linked');
   assert.equal(recovered.next_action,null);
-  assert.equal((await call(b.client,'record_task_plan_output',{plan_id:id,points:1})).structuredContent.should_show,true);
   // Two processes update independent steps in the same plan; neither update may disappear.
   await Promise.all([b,c].map((x,i)=>call(x.client,'update_task_plan_step',{plan_id:id,step_id:`step-${i+2}`,status:'in_progress',agents:[{name:`worker-${i}`,category:'review'}]})));
   const concurrent=(await call(b.client,'get_task_plan',{plan_id:id})).structuredContent.plan;
@@ -66,7 +62,7 @@ try {
   assert.equal((await call(d.client,'get_task_plan',{plan_id:id})).structuredContent.plan.revision,revision);
   await call(d.client,'cancel_task_plan',{plan_id:id});await d.client.close();
   const e=await connect();assert.equal((await call(e.client,'get_task_plan',{plan_id:id})).structuredContent.plan.status,'cancelled');
-  console.log(`Restart smoke passed: SIGKILL recovery, scores, notices, two processes, subplans, rejected mutation, cancellation. Mutation reply: ${oldBytes} -> ${newBytes} chars (${Math.round(100*(1-newBytes/oldBytes))}% smaller).`);
+  console.log(`Restart smoke passed: SIGKILL recovery, notices, two processes, subplans, rejected mutation, cancellation. Mutation reply: ${oldBytes} -> ${newBytes} chars (${Math.round(100*(1-newBytes/oldBytes))}% smaller).`);
 } finally {
   await Promise.all(clients.map(c=>c.close()));
   goals.close();

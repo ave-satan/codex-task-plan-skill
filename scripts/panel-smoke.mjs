@@ -42,7 +42,7 @@ try {
   assert.ok(!tools.find(tool => tool.name === 'ensure_task_plan_panel')._meta?.ui?.resourceUri,
     'Presence check must never attach a UI resource');
   assert.deepEqual(tools.find(tool => tool.name === 'get_chat_task_plan')._meta.ui.visibility, ['app']);
-  assert.ok(!tools.find(tool => tool.name === 'show_task_plan')._meta?.ui?.resourceUri, 'Panel mode must not render repeated inline cards');
+  assert.ok(!tools.some(tool => ['show_task_plan','record_task_plan_output','set_companion_focus_mode'].includes(tool.name)));
 
   const a = await call('create_task_plan', { title: 'Chat A private plan', steps: ['A first', 'A second'], thread_id: chatA });
   const b = await call('create_task_plan', { title: 'Chat B private plan', steps: ['B first', 'B second'] }, chatB);
@@ -78,6 +78,13 @@ try {
   await call('release_task_plan_panel', { instance_id: instance });
   assert.equal((await call('get_task_plan_panel_status')).active, false);
   assert.equal((await raw('ensure_task_plan_panel')).structuredContent.should_open, true);
+  const separateChat = randomUUID();
+  const tabOnly = randomUUID();
+  await call('get_chat_task_plan', { instance_id: tabOnly, tab: true }, separateChat);
+  const reservation = await call('ensure_task_plan_panel', {}, separateChat);
+  assert.equal(reservation.should_open, true, 'A tab cannot suppress an inline card');
+  await call('get_chat_task_plan', { instance_id: tabOnly, tab: true }, separateChat);
+  await call('open_task_plan_panel', { open_token: reservation.open_token }, separateChat);
   const raceChat = randomUUID();
   const racers = await Promise.all([raw('ensure_task_plan_panel', {}, raceChat), raw('ensure_task_plan_panel', {}, raceChat, writer)]);
   assert.equal(racers.filter(result => result.structuredContent.should_open).length, 1, 'Concurrent openers must emit exactly one UI resource');
@@ -93,6 +100,14 @@ try {
   assert.equal((await raw('create_task_plan', { title: 'Mismatched binding', steps: ['One', 'Two'], thread_id: chatB })).isError, true);
   assert.equal((await raw('get_task_plan', { plan_id: a.plan_id, thread_id: chatB }, chatB)).isError, true);
 
+  for (const [name, args] of [
+    ['update_task_plan_step', { step_id: 'step-1', status: 'completed' }],
+    ['revise_task_plan', { title: 'Foreign rename' }],
+    ['cancel_task_plan', {}],
+  ]) {
+    assert.equal((await raw(name, { plan_id: a.plan_id, ...args }, chatB)).isError, true);
+  }
+
   const before = await read(chatA);
   assert.deepEqual((await read(chatA)).storeVersion, before.storeVersion, 'Repeated reads must not advance the snapshot version');
   await call('update_task_plan_step', { plan_id: a.plan_id, step_id: 'step-1', status: 'in_progress', note: 'Updated from a separate MCP writer' }, chatA, writer);
@@ -102,8 +117,7 @@ try {
   const bState = await read(chatB);
   assert.equal(bState.plan.id, b.plan_id);
   assert.equal(bState.plan.steps[0].note, '');
-  const scored = await call('record_task_plan_output', { plan_id: a.plan_id, points: 3 });
-  assert.equal(scored.should_show, false);
+
 
   const child = await call('create_task_plan', { title: 'A child', steps: ['Child one', 'Child two'], parent_plan_id: a.plan_id, parent_step_id: 'step-2' });
   assert.equal((await read(chatA)).plan.id, a.plan_id, 'A linked subplan must not replace its root in the panel');
@@ -129,6 +143,9 @@ try {
   const row = db.prepare('SELECT data FROM plans WHERE id=?').get(latest.plan_id);
   const expired = { ...JSON.parse(row.data), completedAt: new Date(Date.now() - 31_000).toISOString() };
   db.prepare('UPDATE plans SET data=? WHERE id=?').run(JSON.stringify(expired), latest.plan_id);
+  assert.ok((await call('publish_completed_task_plan', { plan_id: latest.plan_id })).plan, 'Can retry an unacknowledged archive');
+  assert.equal((await raw('ack_completed_task_plan', { plan_id: latest.plan_id }, chatB)).isError, true);
+  await call('ack_completed_task_plan', { plan_id: latest.plan_id });
   assert.equal((await read()).plan, null, 'Do not revive an older active plan after the newest plan expires');
   assert.equal(db.prepare('SELECT id FROM plans WHERE id=?').get(latest.plan_id), undefined, 'Expired root is physically removed');
   assert.equal(db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='companion_outbox'").get().n, 0);
@@ -150,6 +167,24 @@ try {
   assert.equal((await read(chatB)).plan.id, b.plan_id);
   await call('get_task_plan', { plan_id: unbound.plan_id, thread_id: chatA });
   assert.equal((await read(chatA)).plan.id, unbound.plan_id);
+
+  const orphan = await call('create_task_plan', { title: 'Unbound cleanup', steps: ['One', 'Two'] }, null);
+  for (const step_id of ['step-1', 'step-2']) {
+    await call('update_task_plan_step', { plan_id: orphan.plan_id, step_id, status: 'completed' }, null);
+  }
+  const cancelled = await call('create_task_plan', { title: 'Cancelled cleanup', steps: ['One', 'Two'] }, emptyChat);
+  await call('cancel_task_plan', { plan_id: cancelled.plan_id }, emptyChat);
+  const cleanupDb = new DatabaseSync(database);
+  for (const id of [orphan.plan_id, cancelled.plan_id]) {
+    cleanupDb.prepare("UPDATE plans SET data=json_set(data,'$.completedAt',?) WHERE id=?")
+      .run(new Date(Date.now() - 31_000).toISOString(), id);
+  }
+  const afterCleanup = await read(chatB);
+  for (const id of [orphan.plan_id, cancelled.plan_id]) {
+    assert.equal(cleanupDb.prepare('SELECT id FROM plans WHERE id=?').get(id), undefined);
+  }
+  assert.deepEqual((await read(chatB)).storeVersion, afterCleanup.storeVersion, 'Cleanup must not bump revision on unchanged reads');
+  cleanupDb.close();
 
   const resource = await client.readResource({ uri: entry._meta.ui.resourceUri });
   assert.equal(resource.contents[0].mimeType, 'text/html;profile=mcp-app');
