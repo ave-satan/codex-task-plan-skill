@@ -1,3 +1,4 @@
+const panelArchive = __TASK_PLAN_ARCHIVE__;
 const panelListeners = new Set();
 const panelInstanceId = crypto.randomUUID();
 const panelRetiredGenerations = new Set();
@@ -20,6 +21,7 @@ let panelAckInFlight = false;
 let panelReleaseInFlight = null;
 let panelHasShownPlan = false;
 let panelCloseRequested = false;
+const panelIsInline = () => panelApp?.getHostContext()?.displayMode === 'inline';
 
 document.documentElement.dataset.panelInstance = panelInstanceId;
 const panelUUID = value => typeof value === 'string'
@@ -36,7 +38,7 @@ const panelPublish = value => {
   const signature = JSON.stringify(panelStableValue({
     thread_id: value.thread_id,
     plan: value.plan,
-    message: value.message ?? '',
+    message: value.message ?? '', retired: value.retired === true,
   }));
   panelLatest = value;
   if (signature === panelLatestSignature) return;
@@ -116,11 +118,17 @@ const panelAccept = (envelope, source, sequence = 0) => {
     panelClear('Не удалось обновить план', thread);
     return;
   }
+  if (source === 'read' && !envelope.plan && panelIsInline()) {
+    panelPublish({ ...envelope, thread_id: thread, retired: true });
+    void panelRelease();
+    panelDispose();
+    return;
+  }
   panelPublish({ ...envelope, thread_id: thread });
   if (envelope.plan) panelHasShownPlan = true;
   // Only a fresh, valid read can confirm that a previously displayed plan
   // expired or was cancelled. Errors and an initially empty panel stay open.
-  else if (source === 'read' && panelHasShownPlan) void panelRequestClose();
+  else if (source === 'read' && panelHasShownPlan && !panelIsInline()) void panelRequestClose();
 };
 const panelSchedule = () => {
   clearTimeout(panelTimer);
@@ -140,7 +148,7 @@ const panelRefresh = () => {
   panelReadAbort = new AbortController();
   panelReadInFlight = Promise.resolve().then(async () => {
     try {
-      const result = await panelApp.callServerTool({ name: 'get_chat_task_plan', arguments: { instance_id: panelInstanceId } },
+      const result = await panelApp.callServerTool({ name: 'get_chat_task_plan', arguments: { instance_id: panelInstanceId, tab: !panelIsInline() } },
         { signal: panelReadAbort.signal, timeout: 8000 });
       if (panelDisposed) return;
       if (result.isError || result.structuredContent?.panel !== true) {
@@ -234,15 +242,21 @@ try {
   } else {
     panelApp = new __PANEL_APP_CLASS__({ name: 'Task Plan', version: '0.2.1' }, {}, { autoResize: true });
     // Register all host notifications before the initialization handshake.
-    panelApp.ontoolresult = result => panelAccept(result.structuredContent, 'notification');
-    panelApp.onhostcontextchanged = () => { void panelRefresh(); };
+    panelApp.ontoolresult = result => {
+      const envelope = result.structuredContent;
+      if (!panelArchive) panelAccept(envelope, 'notification');
+      else if (envelope?.panel === true && panelUUID(envelope.thread_id) && envelope.plan?.status === 'completed') {
+        panelPublish(envelope);
+      }
+    };
+    panelApp.onhostcontextchanged = () => { if (!panelArchive) void panelRefresh(); };
     panelApp.onteardown = async () => { panelDispose(); await panelRelease(); return {}; };
     panelApp.onerror = () => {
       if (panelConnected && !panelDisposed) panelUnavailable();
     };
     await panelApp.connect();
     if (!panelDisposed) {
-      panelConnected = true;
+      panelConnected = !panelArchive;
       document.documentElement.dataset.panelEnvironment = 'mcp-app';
       void panelDrainAck();
       void panelRefresh();

@@ -67,6 +67,11 @@ try {
   assert.equal(reusedOpen._meta?.ui?.resourceUri, undefined);
   const duplicate = await call('get_chat_task_plan', { instance_id: randomUUID() });
   assert.equal(duplicate.panel_duplicate, true);
+  const tabInstance = randomUUID();
+  assert.equal((await call('get_chat_task_plan', { instance_id: tabInstance, tab: true })).plan.id, a.plan_id,
+    'An inline card and a tab can display the same plan');
+  assert.equal((await call('get_chat_task_plan', { instance_id: randomUUID(), tab: true })).panel_duplicate, true);
+  await call('release_task_plan_panel', { instance_id: tabInstance });
   assert.equal((await call('get_task_plan_panel_status')).instance_id, instance);
   await call('release_task_plan_panel', { instance_id: instance }, chatB);
   assert.equal((await call('get_task_plan_panel_status')).active, true, 'Another chat cannot release this panel');
@@ -116,11 +121,16 @@ try {
   await call('update_task_plan_step', { plan_id: latest.plan_id, step_id: 'step-1', status: 'completed' });
   await call('update_task_plan_step', { plan_id: latest.plan_id, step_id: 'step-2', status: 'completed' });
   assert.equal((await read()).plan.status, 'completed');
+  const archived = await call('publish_completed_task_plan', { plan_id: latest.plan_id });
+  assert.equal(archived.plan.status, 'completed');
+  assert.equal(archived.plan.finished, 2);
+  assert.equal((await raw('publish_completed_task_plan', { plan_id: latest.plan_id }, chatB)).isError, true);
   const db = new DatabaseSync(database);
   const row = db.prepare('SELECT data FROM plans WHERE id=?').get(latest.plan_id);
   const expired = { ...JSON.parse(row.data), completedAt: new Date(Date.now() - 31_000).toISOString() };
   db.prepare('UPDATE plans SET data=? WHERE id=?').run(JSON.stringify(expired), latest.plan_id);
   assert.equal((await read()).plan, null, 'Do not revive an older active plan after the newest plan expires');
+  assert.equal(db.prepare('SELECT id FROM plans WHERE id=?').get(latest.plan_id), undefined, 'Expired root is physically removed');
   assert.equal(db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='companion_outbox'").get().n, 0);
   // Legacy roots used goalLink.threadId, without a separate owner field.
   const legacyB = JSON.parse(db.prepare('SELECT data FROM plans WHERE id=?').get(b.plan_id).data);

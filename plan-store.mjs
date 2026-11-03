@@ -27,16 +27,63 @@ export function openPlanStore() {
   let queue = Promise.resolve();
   db.exec('CREATE TABLE IF NOT EXISTS panel_receipts (thread_id TEXT NOT NULL, instance_id TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(thread_id, instance_id))');
   db.exec('CREATE TABLE IF NOT EXISTS panel_presence (thread_id TEXT PRIMARY KEY, instance_id TEXT, seen_at INTEGER NOT NULL DEFAULT 0, opening_until INTEGER NOT NULL DEFAULT 0)');
+  const panelMode = process.env.TASK_PLAN_PRESENTATION === 'panel';
+  const pruneCompleted = () => {
+    const roots = db.prepare(`SELECT id,data FROM plans
+      WHERE json_extract(data,'$.parentPlanId') IS NULL
+        AND json_extract(data,'$.status') = 'completed'
+        AND julianday(json_extract(data,'$.completedAt')) <= julianday('now', '-30 seconds')
+        AND (json_extract(data,'$.publishedInChat') = 1
+          OR julianday(json_extract(data,'$.completedAt')) <= julianday('now', '-1 day'))`).all();
+    for (const row of roots) {
+      const plan = JSON.parse(row.data);
+      const thread = (plan.threadId ?? plan.goalLink?.threadId)?.toLowerCase();
+      if (!thread) continue;
+      // Keep only the ordering boundary so an older root cannot reappear.
+      const key = 'panel_retired_before:' + thread;
+      const boundary = { at: plan.createdAt, sequence: plan.createdSequence ?? 0, id: plan.id };
+      const prior = db.prepare('SELECT value FROM store_meta WHERE key=?').get(key);
+      const previous = prior && JSON.parse(prior.value);
+      if (!previous || boundary.at > previous.at || (boundary.at === previous.at
+          && (boundary.sequence > previous.sequence || (boundary.sequence === previous.sequence && boundary.id > previous.id)))) {
+        db.prepare('INSERT INTO store_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+          .run(key, JSON.stringify(boundary));
+      }
+      db.prepare(`WITH RECURSIVE retired(id) AS (
+        SELECT ? UNION SELECT p.id FROM plans p JOIN retired r ON json_extract(p.data,'$.parentPlanId')=r.id
+      ) DELETE FROM plans WHERE id IN retired`).run(row.id);
+      db.prepare(`DELETE FROM panel_receipts WHERE thread_id=? AND EXISTS (
+        SELECT 1 FROM json_each(panel_receipts.data,'$.history') h WHERE json_extract(h.value,'$.plan_id')=?
+      )`).run(thread, row.id);
+    }
+    return roots.length > 0;
+  };
+  if (panelMode) {
+    setInterval(() => {
+      try {
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          if (pruneCompleted()) db.exec("UPDATE store_meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'");
+          db.exec('COMMIT');
+        } catch (error) { db.exec('ROLLBACK'); throw error; }
+      } catch (error) { console.error('Task Plan cleanup failed:', error.message); }
+    }, 30_000).unref();
+  }
   const presence = threadId => {
     const row = db.prepare('SELECT instance_id,seen_at,opening_until FROM panel_presence WHERE thread_id=?').get(threadId);
     const now = Date.now();
     return { active: Boolean(row?.instance_id && now - row.seen_at < 15000),
       opening: Boolean(row?.opening_until > now), instance_id: row?.instance_id ?? null };
   };
+  const chatPresence = threadId => {
+    const inline = presence(threadId);
+    const tab = presence(threadId + ':tab');
+    return inline.active || !tab.active ? inline : tab;
+  };
   return {
-    panelPresence(threadId) { return presence(threadId); },
+    panelPresence: chatPresence,
     claimPanelOpen(threadId) {
-      const current = presence(threadId);
+      const current = chatPresence(threadId);
       if (current.active || current.opening) return { ...current, should_open: false };
       db.prepare('INSERT INTO panel_presence(thread_id,instance_id,seen_at,opening_until) VALUES(?,NULL,0,?) ON CONFLICT(thread_id) DO UPDATE SET instance_id=NULL,seen_at=0,opening_until=excluded.opening_until')
         .run(threadId, Date.now() + 15000);
@@ -51,16 +98,17 @@ export function openPlanStore() {
       db.prepare('DELETE FROM store_meta WHERE key=?').run('panel_open:' + threadId);
       return true;
     },
-    touchPanel(threadId, instanceId) {
-      const current = presence(threadId);
+    touchPanel(threadId, instanceId, tab) {
+      const key = tab ? threadId + ":tab" : threadId;
+      const current = presence(key);
       if (current.active && current.instance_id !== instanceId) return false;
       db.prepare('INSERT INTO panel_presence(thread_id,instance_id,seen_at,opening_until) VALUES(?,?,?,0) ON CONFLICT(thread_id) DO UPDATE SET instance_id=excluded.instance_id,seen_at=excluded.seen_at,opening_until=0')
-        .run(threadId, instanceId, Date.now());
+        .run(key, instanceId, Date.now());
       db.prepare('DELETE FROM store_meta WHERE key=?').run('panel_open:' + threadId);
       return true;
     },
     releasePanel(threadId, instanceId) {
-      db.prepare('UPDATE panel_presence SET instance_id=NULL,seen_at=0 WHERE thread_id=? AND instance_id=?').run(threadId, instanceId);
+      db.prepare('UPDATE panel_presence SET instance_id=NULL,seen_at=0 WHERE thread_id IN (?,?) AND instance_id=?').run(threadId, threadId + ":tab", instanceId);
     },
     nextPlanSequence() {
       const row = db.prepare('SELECT value FROM store_meta WHERE key=?').get('plan_sequence');
@@ -84,6 +132,7 @@ export function openPlanStore() {
       const operation = queue.then(async () => {
         db.exec('BEGIN IMMEDIATE');
         try {
+          const pruned = panelMode && pruneCompleted();
           plans.clear();
           const before = new Map();
           const rows = Object.hasOwn(options, 'scopeThreadId')
@@ -91,9 +140,12 @@ export function openPlanStore() {
                 SELECT id,data FROM (SELECT id,data FROM plans
                   WHERE json_extract(data,'$.parentPlanId') IS NULL
                     AND lower(coalesce(json_extract(data,'$.threadId'),json_extract(data,'$.goalLink.threadId'))) = ?
+                    AND NOT EXISTS (SELECT 1 FROM store_meta m WHERE m.key='panel_retired_before:' || ?
+                      AND (json_extract(plans.data,'$.createdAt'), coalesce(json_extract(plans.data,'$.createdSequence'),0), plans.id)
+                        <= (json_extract(m.value,'$.at'), json_extract(m.value,'$.sequence'), json_extract(m.value,'$.id')))
                   ORDER BY json_extract(data,'$.createdAt') DESC, coalesce(json_extract(data,'$.createdSequence'),0) DESC, id DESC LIMIT 1)
                 UNION ALL SELECT p.id,p.data FROM plans p JOIN selected parent ON json_extract(p.data,'$.parentPlanId') = parent.id
-              ) SELECT id,data FROM selected`).all(options.scopeThreadId) : []
+              ) SELECT id,data FROM selected`).all(options.scopeThreadId, options.scopeThreadId) : []
             : db.prepare('SELECT id,data FROM plans').all();
           for (const row of rows) {
             const plan = JSON.parse(row.data);
@@ -102,7 +154,7 @@ export function openPlanStore() {
           }
           const result = await action();
           let createdRoot = false;
-          let changed = false;
+          let changed = pruned;
           for (const [id, plan] of plans) {
             const data = JSON.stringify(plan);
             if (before.get(id) !== data) { upsert.run(id, data); changed = true; }

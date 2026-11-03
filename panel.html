@@ -263,6 +263,7 @@
     }
     function render(payload) {
       if (!payload || payload.panel !== true) return;
+      $('app').hidden = payload.retired === true;
       const signature = JSON.stringify({ thread_id: payload.thread_id, plan: payload.plan, message: payload.message ?? '' });
       if (signature === renderedSignature) return;
       renderedSignature = signature;

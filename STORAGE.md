@@ -16,8 +16,9 @@ Root plans store a chat ID independently of their goal link. Older roots whose
 chat ID exists only in `goalLink.threadId` remain readable. The conversation panel
 uses only the chat ID injected by Codex into MCP request metadata, selects that
 chat's newest root, and never falls back to global plans. A completed root remains
-visible for 30 seconds; it is retained in storage afterwards. Older active roots
-do not reappear when a newer root finishes or is cancelled.
+in live storage for 30 seconds, then it and its descendants are removed. The final card renders from the snapshot in the conversation tool result.
+Unpublished completions have a one-day cleanup deadline so publication can be retried.
+Older active roots do not reappear when a newer root finishes or is cancelled.
 
 The panel reads through MCP once per second while visible. A persistent store
 generation and monotonic revision order snapshots across server processes.
