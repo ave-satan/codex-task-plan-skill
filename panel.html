@@ -22,6 +22,12 @@
     }
     * { box-sizing: border-box; }
     [hidden] { display: none !important; }
+    html[data-retired="true"], html[data-retired="true"] body {
+      height: 1px !important;
+      min-height: 0 !important;
+      overflow: hidden;
+      background: transparent;
+    }
     body { margin: 0; background: var(--surface); color: var(--text); font-size: 13px; line-height: 1.4; }
     .app { width: 100%; min-width: 0; }
     .header { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 14px 12px 13px; }
@@ -264,6 +270,7 @@
     function render(payload) {
       if (!payload || payload.panel !== true) return;
       $('app').hidden = payload.retired === true;
+      document.documentElement.dataset.retired = String(payload.retired === true);
       const signature = JSON.stringify({ thread_id: payload.thread_id, plan: payload.plan, message: payload.message ?? '' });
       if (signature === renderedSignature) return;
       renderedSignature = signature;

@@ -187,6 +187,9 @@ try {
   cleanupDb.close();
 
   const resource = await client.readResource({ uri: entry._meta.ui.resourceUri });
+  const previousLiveResource = await client.readResource({ uri: 'ui://codex-task-plan/chat-panel-v9.html' });
+  assert.equal(previousLiveResource.contents[0].text, resource.contents[0].text,
+    'Saved live cards must resolve to the corrected renderer');
   assert.equal(resource.contents[0].mimeType, 'text/html;profile=mcp-app');
   assert.ok(!resource.contents[0].text.includes('/*__PANEL_BRIDGE__*/'));
   assert.ok(!resource.contents[0].text.includes('/*__WORK_CATEGORY_ICONS__*/'));

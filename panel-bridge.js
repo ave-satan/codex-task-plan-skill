@@ -126,6 +126,11 @@ const panelAccept = (envelope, source, sequence = 0) => {
   }
   if (source === 'read' && !envelope.plan && panelIsInline()) {
     panelPublish({ ...envelope, thread_id: thread, retired: true });
+    // A zero-height document can leave the host at its previous iframe height.
+    // Report a positive collapsed size explicitly, after the retired DOM paints.
+    requestAnimationFrame(() => {
+      void panelApp.sendSizeChanged({ height: 1 }).catch(() => {});
+    });
     void panelRelease();
     panelDispose();
     return;
