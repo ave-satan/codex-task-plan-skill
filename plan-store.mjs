@@ -37,11 +37,7 @@ export function openPlanStore() {
     const roots = db.prepare(`SELECT id,data FROM plans
       WHERE json_extract(data,'$.parentPlanId') IS NULL
         AND json_extract(data,'$.status') IN ('completed','cancelled')
-        AND julianday(json_extract(data,'$.completedAt')) <= julianday('now', '-30 seconds')
-        AND (json_extract(data,'$.archiveRendered') = 1
-          OR json_extract(data,'$.status') = 'cancelled'
-          OR coalesce(json_extract(data,'$.threadId'),json_extract(data,'$.goalLink.threadId')) IS NULL
-          OR julianday(json_extract(data,'$.completedAt')) <= julianday('now', '-1 day'))`).all();
+        AND julianday(json_extract(data,'$.completedAt')) <= julianday('now', '-30 seconds')`).all();
     for (const row of roots) {
       const plan = JSON.parse(row.data);
       const thread = (plan.threadId ?? plan.goalLink?.threadId)?.toLowerCase();

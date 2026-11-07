@@ -19,7 +19,7 @@ const root = dirname(fileURLToPath(import.meta.url));
 const categoryIcons = Object.fromEntries(await Promise.all(workCategories.map(async ({ id, label }) => [
   id, { label, src: `data:image/png;base64,${(await readFile(join(root, "assets", "agent-icons", `${id}.png`))).toString("base64")}` },
 ])));
-const panelUri = "ui://codex-task-plan/chat-panel-v10.html";
+const panelUri = "ui://codex-task-plan/chat-panel-v11.html";
 const archiveUri = "ui://codex-task-plan/completed.html";
 const plans = new Map();
 const store = openPlanStore();
@@ -673,7 +673,7 @@ registerAppResource(server, 'Task Plan — completed', archiveUri,
         'openai/ui': { availableDisplayModes: ['inline'] }, 'openai/widgetMinFrameHeight': 0 } }],
   }));
 // Keep the previous resource resolvable for live cards saved in chat history.
-for (const uri of [panelUri, 'ui://codex-task-plan/chat-panel-v9.html']) {
+for (const uri of [panelUri, 'ui://codex-task-plan/chat-panel-v10.html', 'ui://codex-task-plan/chat-panel-v9.html']) {
   registerAppResource(server, 'Task Plan — current chat', uri,
     { description: 'Live Task Plan panel scoped to its host conversation.' }, async () => ({ contents: [{ uri, mimeType: RESOURCE_MIME_TYPE,
       text: await panelHtml(), _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] }, prefersBorder: false },

@@ -139,13 +139,13 @@ try {
   assert.equal(archived.plan.status, 'completed');
   assert.equal(archived.plan.finished, 2);
   assert.equal((await raw('publish_completed_task_plan', { plan_id: latest.plan_id }, chatB)).isError, true);
+  assert.equal((await raw('ack_completed_task_plan', { plan_id: latest.plan_id }, chatB)).isError, true);
   const db = new DatabaseSync(database);
   const row = db.prepare('SELECT data FROM plans WHERE id=?').get(latest.plan_id);
   const expired = { ...JSON.parse(row.data), completedAt: new Date(Date.now() - 31_000).toISOString() };
   db.prepare('UPDATE plans SET data=? WHERE id=?').run(JSON.stringify(expired), latest.plan_id);
-  assert.ok((await call('publish_completed_task_plan', { plan_id: latest.plan_id })).plan, 'Can retry an unacknowledged archive');
-  assert.equal((await raw('ack_completed_task_plan', { plan_id: latest.plan_id }, chatB)).isError, true);
-  await call('ack_completed_task_plan', { plan_id: latest.plan_id });
+  assert.equal((await call('ack_completed_task_plan', { plan_id: latest.plan_id })).acknowledged, true, 'Expired receipts are harmless once the record is gone');
+  assert.equal((await raw('publish_completed_task_plan', { plan_id: latest.plan_id })).isError, true, 'Cleanup does not wait for archive publication or acknowledgement');
   assert.equal((await read()).plan, null, 'Do not revive an older active plan after the newest plan expires');
   assert.equal(db.prepare('SELECT id FROM plans WHERE id=?').get(latest.plan_id), undefined, 'Expired root is physically removed');
   assert.equal(db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='companion_outbox'").get().n, 0);
@@ -172,17 +172,25 @@ try {
   for (const step_id of ['step-1', 'step-2']) {
     await call('update_task_plan_step', { plan_id: orphan.plan_id, step_id, status: 'completed' }, null);
   }
+  const completed = await call('create_task_plan', { title: 'No final card', steps: ['Linked work', 'Finish'] }, emptyChat);
+  const completedChild = await call('create_task_plan', { title: 'Child cleanup', steps: ['One', 'Two'], parent_plan_id: completed.plan_id, parent_step_id: 'step-1' }, emptyChat);
+  for (const step_id of ['step-1', 'step-2']) {
+    await call('update_task_plan_step', { plan_id: completedChild.plan_id, step_id, status: 'completed' }, emptyChat);
+  }
+  await call('update_task_plan_step', { plan_id: completed.plan_id, step_id: 'step-2', status: 'completed' }, emptyChat);
+  assert.equal((await read(emptyChat)).plan.status, 'completed');
   const cancelled = await call('create_task_plan', { title: 'Cancelled cleanup', steps: ['One', 'Two'] }, emptyChat);
   await call('cancel_task_plan', { plan_id: cancelled.plan_id }, emptyChat);
   const cleanupDb = new DatabaseSync(database);
-  for (const id of [orphan.plan_id, cancelled.plan_id]) {
+  for (const id of [orphan.plan_id, cancelled.plan_id, completed.plan_id]) {
     cleanupDb.prepare("UPDATE plans SET data=json_set(data,'$.completedAt',?) WHERE id=?")
       .run(new Date(Date.now() - 31_000).toISOString(), id);
   }
   const afterCleanup = await read(chatB);
-  for (const id of [orphan.plan_id, cancelled.plan_id]) {
+  for (const id of [orphan.plan_id, cancelled.plan_id, completed.plan_id]) {
     assert.equal(cleanupDb.prepare('SELECT id FROM plans WHERE id=?').get(id), undefined);
   }
+  assert.equal(cleanupDb.prepare('SELECT id FROM plans WHERE id=?').get(completedChild.plan_id), undefined, 'Completed root cleanup removes linked children without publishing a final card');
   assert.deepEqual((await read(chatB)).storeVersion, afterCleanup.storeVersion, 'Cleanup must not bump revision on unchanged reads');
   cleanupDb.close();
 

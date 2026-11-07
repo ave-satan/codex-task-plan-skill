@@ -22,6 +22,7 @@ let panelReleaseInFlight = null;
 let panelHasShownPlan = false;
 let panelCloseRequested = false;
 let panelArchiveAck = null;
+let panelFrozen = false;
 const panelIsInline = () => panelApp?.getHostContext()?.displayMode === 'inline';
 
 document.documentElement.dataset.panelInstance = panelInstanceId;
@@ -67,7 +68,7 @@ const panelRequestClose = async () => {
   try { await panelApp.requestTeardown(); } catch { /* The host owns the tab. */ }
 };
 const panelAccept = (envelope, source, sequence = 0) => {
-  if (panelDisposed || !envelope || envelope.panel !== true) return;
+  if (panelDisposed || panelFrozen || !envelope || envelope.panel !== true) return;
   if (panelIdentityViolation) return;
   // Cached opening-tool notifications may predate this mounted panel. Bind
   // and paint from a fresh read that carries the current host chat metadata.
@@ -137,19 +138,27 @@ const panelAccept = (envelope, source, sequence = 0) => {
   }
   panelPublish({ ...envelope, thread_id: thread });
   if (envelope.plan) panelHasShownPlan = true;
+  if (envelope.plan?.status === 'completed') {
+    // The mounted view owns its final snapshot. Cleanup and subsequent plans
+    // must not replace it or close its tab; a remount may legitimately be empty.
+    panelFrozen = true;
+    clearTimeout(panelTimer);
+    panelRefreshWanted = false;
+    void panelRelease();
+  }
   // Only a fresh, valid read can confirm that a previously displayed plan
   // expired or was cancelled. Errors and an initially empty panel stay open.
-  else if (source === 'read' && panelHasShownPlan && !panelIsInline()) void panelRequestClose();
+  else if (source === 'read' && !envelope.plan && panelHasShownPlan && !panelIsInline()) void panelRequestClose();
 };
 const panelSchedule = () => {
   clearTimeout(panelTimer);
-  if (!panelDisposed && !panelIdentityViolation && panelConnected && !document.hidden) {
+  if (!panelDisposed && !panelFrozen && !panelIdentityViolation && panelConnected && !document.hidden) {
     panelTimer = setTimeout(panelRefresh, 1000);
   }
 };
 const panelRefresh = () => {
   clearTimeout(panelTimer);
-  if (panelDisposed || panelIdentityViolation || !panelConnected || document.hidden) return Promise.resolve();
+  if (panelDisposed || panelFrozen || panelIdentityViolation || !panelConnected || document.hidden) return Promise.resolve();
   if (panelReadInFlight) {
     panelRefreshWanted = true;
     return panelReadInFlight;
@@ -178,7 +187,7 @@ const panelRefresh = () => {
       panelReadAbort = null;
       const wanted = panelRefreshWanted;
       panelRefreshWanted = false;
-      if (wanted && !panelDisposed && !panelIdentityViolation && !document.hidden) {
+      if (wanted && !panelDisposed && !panelFrozen && !panelIdentityViolation && !document.hidden) {
         queueMicrotask(panelRefresh);
       } else panelSchedule();
     }
