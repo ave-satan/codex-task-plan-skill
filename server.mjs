@@ -229,7 +229,7 @@ const server = new McpServer(
   {
     instructions: "Only the main agent manages this plugin. Delegated subagents must not call any task-plan tools; they report results to the main agent. Reuse a worker to clarify, correct, or continue its original deliverable, or for a different assignment with the same role. For a new assignment, state its scope and inputs explicitly and treat prior task-specific assumptions as unverified. Otherwise start a fresh subagent for semantically different work, with only relevant context. Keep completed agent icons with status=completed; only working agents count as parallel work. " +
       "Create one plan only for substantial decomposed work. Represent actual dependencies and independently deliverable branches. For large tasks, delegate ready independent branches early by default when tools and the user's scope allow it, and continue useful main-agent work while they run. Sequential execution of a large task needs a concrete dependency, write-conflict, tool, or user constraint; reassess as work becomes ready. Keep its returned plan_id with the task context and accept a known plan_id from another conversation when explicitly requested. Revise the existing plan when scope changes instead of replacing it. Only one ordinary main-agent step may be in progress; assigned subagent steps may run alongside it. Additional concurrent steps require assigned agents, linked subplans, or a concise parallel_activity describing real background work. Attach the names of currently working subagents to their steps. " +
-      "Call ensure_task_plan_panel after goal binding. If it returns should_open=true, use its token to show the plan inline. Tabs open only on user action. Immediately after completing the root, call publish_completed_task_plan once. Never show another chat's plan as a fallback.",
+      "Call ensure_task_plan_panel after goal binding. If it returns should_open=true, use its token to show the plan inline. Tabs open only on user action. Do not publish another card automatically at completion. Use publish_completed_task_plan only when the user explicitly asks to save a final card. Never show another chat's plan as a fallback.",
   },
 );
 
@@ -624,7 +624,7 @@ registerAppTool(server, 'get_task_plan_panel_status', {
 
 registerAppTool(server, 'publish_completed_task_plan', {
   title: 'Итог плана',
-  description: 'Call once immediately after root completion to save a final card in the conversation, independently of live storage.',
+  description: 'Save a completed root as a final card in the conversation, independently of live storage. Use only when the user explicitly requests a final card; do not call automatically at completion.',
   inputSchema: { plan_id: z.string().uuid() }, annotations: panelReadAnnotations,
   _meta: { ui: { resourceUri: archiveUri, visibility: ['model', 'app'] }, 'openai/outputTemplate': archiveUri,
     'openai/ui': { preferredModelDisplayMode: 'inline' } },
