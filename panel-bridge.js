@@ -24,6 +24,8 @@ let panelCloseRequested = false;
 let panelArchiveAck = null;
 let panelFrozen = false;
 const panelIsInline = () => panelApp?.getHostContext()?.displayMode === 'inline';
+// A mounted active view must receive completion even while it is offscreen.
+const panelCanRefresh = () => !document.hidden || panelLatest?.plan?.status === 'active';
 
 document.documentElement.dataset.panelInstance = panelInstanceId;
 const panelUUID = value => typeof value === 'string'
@@ -152,13 +154,13 @@ const panelAccept = (envelope, source, sequence = 0) => {
 };
 const panelSchedule = () => {
   clearTimeout(panelTimer);
-  if (!panelDisposed && !panelFrozen && !panelIdentityViolation && panelConnected && !document.hidden) {
-    panelTimer = setTimeout(panelRefresh, 1000);
+  if (!panelDisposed && !panelFrozen && !panelIdentityViolation && panelConnected && panelCanRefresh()) {
+    panelTimer = setTimeout(panelRefresh, document.hidden ? 5000 : 1000);
   }
 };
 const panelRefresh = () => {
   clearTimeout(panelTimer);
-  if (panelDisposed || panelFrozen || panelIdentityViolation || !panelConnected || document.hidden) return Promise.resolve();
+  if (panelDisposed || panelFrozen || panelIdentityViolation || !panelConnected || !panelCanRefresh()) return Promise.resolve();
   if (panelReadInFlight) {
     panelRefreshWanted = true;
     return panelReadInFlight;
@@ -187,7 +189,7 @@ const panelRefresh = () => {
       panelReadAbort = null;
       const wanted = panelRefreshWanted;
       panelRefreshWanted = false;
-      if (wanted && !panelDisposed && !panelFrozen && !panelIdentityViolation && !document.hidden) {
+      if (wanted && !panelDisposed && !panelFrozen && !panelIdentityViolation && panelCanRefresh()) {
         queueMicrotask(panelRefresh);
       } else panelSchedule();
     }
@@ -262,6 +264,7 @@ window.addEventListener('pagehide', () => {
 document.addEventListener('visibilitychange', () => {
   clearTimeout(panelTimer);
   if (!document.hidden) void panelRefresh();
+  else panelSchedule();
 });
 
 try {

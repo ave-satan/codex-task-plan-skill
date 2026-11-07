@@ -38,7 +38,7 @@ async function mount(mode) {
   });
   await flush();
   return {
-    calls, states, timers, app, events,
+    calls, states, timers, app, events, document,
     get closed() { return closed; },
     setPlan(plan) { current = { ...current, plan, storeVersion: { ...current.storeVersion, revision: current.storeVersion.revision + 1 } }; },
     async tick() {
@@ -49,6 +49,9 @@ async function mount(mode) {
 }
 for (const mode of ['inline', 'fullscreen']) {
   const view = await mount(mode);
+  view.document.hidden = true;
+  view.events.get('visibilitychange')();
+  assert.ok(view.timers.size > 0, 'An offscreen active view still receives completion');
   assert.equal(view.states.at(-1).plan.status, 'active');
   assert.equal(view.closed, 0, 'An active tab stays open');
   const completed = { ...view.states.at(-1).plan, status: 'completed', revision: 2, finished: 2, total: 2 };
