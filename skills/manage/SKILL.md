@@ -34,6 +34,10 @@ Only the main agent uses this plugin. If you are a delegated subagent, do not ca
 
 Do not create a plan merely to answer a question, inspect one file, or perform a trivial edit. Keep step titles compact and do not expose internal reasoning.
 
+## Chat language
+
+When the user has activated the pohuy skill in this chat, plan titles, step titles, and step notes may follow its selected language level. These private chat-facing plan fields are conversation text, not public documentation or source code. Keep actions, outcomes, and blockers clear; preserve technical identifiers verbatim and follow the skill's safety and targeting boundaries. Do not activate pohuy merely to write a plan. Public artifacts, code, commits, and PRs retain their existing language rules.
+
 ## Parallel execution
 
 For large tasks, delegation is the default when independent work is available. Typical triggers are changes across several components, repository-wide reviews, research with separate evidence sources, or several independently verifiable deliverables.
